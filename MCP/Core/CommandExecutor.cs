@@ -1084,7 +1084,8 @@ namespace RevitMCP.Core
                     MinY = Math.Round(bbox.Min.Y * 304.8, 2),
                     MaxX = Math.Round(bbox.Max.X * 304.8, 2),
                     MaxY = Math.Round(bbox.Max.Y * 304.8, 2)
-                } : null
+                } : null,
+                BoundarySegments = GetRoomBoundarySegments(room)
             };
         }
 
@@ -2791,6 +2792,48 @@ namespace RevitMCP.Core
                 TotalPairs = storedCount,
                 Message = $"已恢復 {rejoinedCount} 個接合關係"
             };
+        }
+
+
+        /// <summary>
+        /// 取得房間邊界線段 (用於精確計算走廊寬度)
+        /// </summary>
+        private List<object> GetRoomBoundarySegments(Room room)
+        {
+            var segments = new List<object>();
+            var options = new SpatialElementBoundaryOptions();
+            
+            try 
+            {
+                var boundarySegments = room.GetBoundarySegments(options);
+                if (boundarySegments == null || boundarySegments.Count == 0)
+                    return segments;
+                    
+                foreach (var loop in boundarySegments)
+                {
+                    foreach (BoundarySegment seg in loop)
+                    {
+                        var curve = seg.GetCurve();
+                        var start = curve.GetEndPoint(0);
+                        var end = curve.GetEndPoint(1);
+                        
+                        segments.Add(new {
+                            StartX = Math.Round(start.X * 304.8, 2),
+                            StartY = Math.Round(start.Y * 304.8, 2),
+                            EndX = Math.Round(end.X * 304.8, 2),
+                            EndY = Math.Round(end.Y * 304.8, 2),
+                            Length = Math.Round(curve.Length * 304.8, 2)
+                        });
+                    }
+                }
+            }
+            catch (Exception)
+            {
+                // 某些房間可能無法取得邊界 (未封閉、未放置等)
+                // 回傳空陣列,讓 JS 端使用 BoundingBox fallback
+            }
+            
+            return segments;
         }
 
         #endregion
