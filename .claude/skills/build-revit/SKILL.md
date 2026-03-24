@@ -28,7 +28,7 @@ Build the RevitMCP Revit add-in using the unified `RevitMCP.csproj` and `Nice3po
 1. Locate `MCP/RevitMCP.csproj` by searching from the current directory upward
 2. `cd` into the `MCP/` directory
 3. Run: `dotnet build -c Release.R{YY} RevitMCP.csproj` where `{YY}` = last 2 digits (e.g. 2024 → R24, 2022 → R22)
-4. After build, check that `MCP/bin/Release.R{YY}/RevitMCP.dll` was created or updated (e.g. `bin/Release.R24/RevitMCP.dll` for Revit 2024)
+4. After build, check that `MCP/bin/Release.R{YY}/RevitMCP.dll` was created or updated
 5. Report: ✅ success with DLL file size and timestamp, then suggest running `/deploy-addon --version {version}` as next step
 
 ## When Using `--all`

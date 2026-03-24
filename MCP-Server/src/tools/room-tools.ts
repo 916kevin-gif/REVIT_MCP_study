@@ -52,4 +52,24 @@ export const roomTools: Tool[] = [
             },
         },
     },
+    {
+        name: "get_room_surface_areas",
+        description: "計算房間內部表面積（牆面、地板、天花板），支援門窗開口扣除。即使模型中無實體天花板或地板元素，仍會以房間平面面積估算。回傳含 EstimatedSurfaces 欄位標示哪些為估算值。用於材料估算、塗裝面積計算、聲學分析。啟用 includeFinishLayers 可偵測房間內非邊界粉刷層，自動寫入房間飾面參數、建立明細表、匯出 Excel。【兩次呼叫工作流程】當 includeFinishLayers=true 時，建議分兩次呼叫：第一次不帶 defaultXxxFinish 參數，取得分析結果後檢查哪些房間/表面缺少粉刷層（FloorFinishLayers / CeilingFinishLayers / Breakdown.FinishLayers 為 null），詢問使用者要統一填入什麼預設類型標記（地板/牆面/天花各一種，留空=不填），再以 defaultFloorFinish / defaultWallFinish / defaultCeilingFinish 參數第二次呼叫產出最終明細表與 Excel。",
+        inputSchema: {
+            type: "object",
+            properties: {
+                roomId: { type: "number", description: "房間 Element ID（選填）" },
+                roomName: { type: "string", description: "房間名稱篩選（選填）" },
+                level: { type: "string", description: "樓層名稱 — 計算該層所有房間（選填）" },
+                includeBreakdown: { type: "boolean", description: "是否包含各牆面詳細資訊（預設 true）", default: true },
+                subtractOpenings: { type: "boolean", description: "是否扣除門窗開口面積（預設 true）", default: true },
+                includeFinishLayers: { type: "boolean", description: "是否偵測房間內的粉刷層/面飾層並建立明細表、匯出 Excel。必須明確指定 true 或 false。" },
+                outputPath: { type: "string", description: "Excel 匯出路徑（選填，預設為專案目錄）" },
+                defaultFloorFinish: { type: "string", description: "未偵測到地板粉刷層時的預設類型標記（Type Mark）。留空表示不填。" },
+                defaultWallFinish: { type: "string", description: "未偵測到牆面粉刷層時的預設類型標記（Type Mark）。留空表示不填。" },
+                defaultCeilingFinish: { type: "string", description: "未偵測到天花粉刷層時的預設類型標記（Type Mark）。留空表示不填。" },
+            },
+            required: ["includeFinishLayers"],
+        },
+    },
 ];
