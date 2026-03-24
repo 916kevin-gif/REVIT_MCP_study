@@ -133,6 +133,10 @@ namespace RevitMCP.Core
                     case "get_rooms_by_level":
                         result = GetRoomsByLevel(parameters);
                         break;
+
+                    case "get_room_surface_areas":
+                        result = GetRoomSurfaceAreas(parameters);
+                        break;
                     
                     case "get_all_views":
                         result = GetAllViews(parameters);

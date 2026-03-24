@@ -38,7 +38,7 @@ Then stop.
 
 ## Steps
 
-1. **Check source DLL**: Verify `MCP/bin/Release/RevitMCP.dll` exists.
+1. **Check source DLL**: Verify `MCP/bin/Release.R{YY}/RevitMCP.dll` exists.
    - If missing → tell user to run `/build-revit --version {version}` first, then stop.
 
 2. **Warn before copy**: Display:
