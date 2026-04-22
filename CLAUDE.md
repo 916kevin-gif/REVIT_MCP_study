@@ -214,6 +214,7 @@ The `domain/` directory contains BIM compliance workflows that AI must consult b
 | 填充圖案, fill pattern, 轉換 | `domain/revit-fill-pattern-conversion.md` |
 | 房間編號, room numbering, 自動編號 | `domain/room-numbering-workflow.md` |
 | 房間表面積, 粉刷, surface area, finish | `domain/room-surface-area-review.md` |
+| 粉刷圖例, 材料圖例, finish legend, fill pattern legend | `domain/finish-legend-creation.md` |
 | 樓梯法規, stair compliance, 淨高, 級高級深 | `domain/stair-compliance-check.md` |
 
 ## Deployment Rules (DO NOT VIOLATE)

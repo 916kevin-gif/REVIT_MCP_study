@@ -1947,9 +1947,9 @@ namespace RevitMCP.Core
                 // 標題行
                 string[] headers = {
                     "房間編號", "房間名稱",
-                    "地板粉刷層", "地板粉刷面積(m²)", "地板總表面積(m²)",
-                    "牆面粉刷層", "牆面粉刷面積(m²)", "牆面總表面積(m²)",
-                    "天花粉刷層", "天花粉刷面積(m²)", "天花總表面積(m²)"
+                    "地板類型標記", "地板粉刷層", "地板粉刷面積(m²)", "地板總表面積(m²)",
+                    "牆面類型標記", "牆面粉刷層", "牆面粉刷面積(m²)", "牆面總表面積(m²)",
+                    "天花類型標記", "天花粉刷層", "天花粉刷面積(m²)", "天花總表面積(m²)"
                 };
 
                 for (int c = 0; c < headers.Length; c++)
@@ -1981,22 +1981,25 @@ namespace RevitMCP.Core
                         // 地板
                         if (i < floorLayers.Count)
                         {
-                            ws.Cell(currentRow, 3).Value = floorLayers[i].Item1; // 名稱
-                            ws.Cell(currentRow, 4).Value = floorLayers[i].Item2; // 面積
+                            ws.Cell(currentRow, 3).Value = floorLayers[i].Item1; // TypeMark
+                            ws.Cell(currentRow, 4).Value = floorLayers[i].Item2; // TypeName
+                            ws.Cell(currentRow, 5).Value = floorLayers[i].Item3; // 面積
                         }
 
                         // 牆面
                         if (i < wallLayers.Count)
                         {
-                            ws.Cell(currentRow, 6).Value = wallLayers[i].Item1;
-                            ws.Cell(currentRow, 7).Value = wallLayers[i].Item2;
+                            ws.Cell(currentRow, 7).Value = wallLayers[i].Item1;  // TypeMark
+                            ws.Cell(currentRow, 8).Value = wallLayers[i].Item2;  // TypeName
+                            ws.Cell(currentRow, 9).Value = wallLayers[i].Item3;  // 面積
                         }
 
                         // 天花
                         if (i < ceilingLayers.Count)
                         {
-                            ws.Cell(currentRow, 9).Value = ceilingLayers[i].Item1;
-                            ws.Cell(currentRow, 10).Value = ceilingLayers[i].Item2;
+                            ws.Cell(currentRow, 11).Value = ceilingLayers[i].Item1; // TypeMark
+                            ws.Cell(currentRow, 12).Value = ceilingLayers[i].Item2; // TypeName
+                            ws.Cell(currentRow, 13).Value = ceilingLayers[i].Item3; // 面積
                         }
                     }
 
@@ -2005,17 +2008,17 @@ namespace RevitMCP.Core
 
                     ws.Cell(startRow, 1).Value = (string)roomResult.Number;
                     ws.Cell(startRow, 2).Value = (string)roomResult.Name;
-                    ws.Cell(startRow, 5).Value = (double)roomResult.FloorArea_m2;
-                    ws.Cell(startRow, 8).Value = (double)roomResult.WallNetArea_m2;
-                    ws.Cell(startRow, 11).Value = (double)roomResult.CeilingArea_m2;
+                    ws.Cell(startRow, 6).Value = (double)roomResult.FloorArea_m2;
+                    ws.Cell(startRow, 10).Value = (double)roomResult.WallNetArea_m2;
+                    ws.Cell(startRow, 14).Value = (double)roomResult.CeilingArea_m2;
 
                     if (maxRows > 1)
                     {
                         ws.Range(startRow, 1, endRow, 1).Merge().Style.Alignment.SetVertical(XLAlignmentVerticalValues.Center);
                         ws.Range(startRow, 2, endRow, 2).Merge().Style.Alignment.SetVertical(XLAlignmentVerticalValues.Center);
-                        ws.Range(startRow, 5, endRow, 5).Merge().Style.Alignment.SetVertical(XLAlignmentVerticalValues.Center);
-                        ws.Range(startRow, 8, endRow, 8).Merge().Style.Alignment.SetVertical(XLAlignmentVerticalValues.Center);
-                        ws.Range(startRow, 11, endRow, 11).Merge().Style.Alignment.SetVertical(XLAlignmentVerticalValues.Center);
+                        ws.Range(startRow, 6, endRow, 6).Merge().Style.Alignment.SetVertical(XLAlignmentVerticalValues.Center);
+                        ws.Range(startRow, 10, endRow, 10).Merge().Style.Alignment.SetVertical(XLAlignmentVerticalValues.Center);
+                        ws.Range(startRow, 14, endRow, 14).Merge().Style.Alignment.SetVertical(XLAlignmentVerticalValues.Center);
                     }
 
                     // 交替行底色
@@ -2048,9 +2051,9 @@ namespace RevitMCP.Core
         /// <summary>
         /// 從 roomResult 收集指定類別的粉刷層列表（名稱, 面積）
         /// </summary>
-        private List<Tuple<string, double>> CollectFinishLayersFromResult(dynamic roomResult, string category)
+        private List<Tuple<string, string, double>> CollectFinishLayersFromResult(dynamic roomResult, string category)
         {
-            var result = new List<Tuple<string, double>>();
+            var result = new List<Tuple<string, string, double>>();
 
             if (category == "Wall")
             {
@@ -2063,7 +2066,7 @@ namespace RevitMCP.Core
                         {
                             foreach (dynamic fl in bd.FinishLayers)
                             {
-                                result.Add(Tuple.Create((string)fl.TypeName, (double)fl.CoverageArea_m2));
+                                result.Add(Tuple.Create((string)fl.TypeMark, (string)fl.TypeName, (double)fl.CoverageArea_m2));
                             }
                         }
                     }
@@ -2073,7 +2076,7 @@ namespace RevitMCP.Core
                 {
                     foreach (dynamic fl in roomResult.UnassociatedFinishLayers)
                     {
-                        result.Add(Tuple.Create((string)fl.TypeName, (double)fl.CoverageArea_m2));
+                        result.Add(Tuple.Create((string)fl.TypeMark, (string)fl.TypeName, (double)fl.CoverageArea_m2));
                     }
                 }
             }
@@ -2081,18 +2084,21 @@ namespace RevitMCP.Core
             {
                 foreach (dynamic fl in roomResult.FloorFinishLayers)
                 {
-                    result.Add(Tuple.Create((string)fl.TypeName, (double)fl.CoverageArea_m2));
+                    result.Add(Tuple.Create((string)fl.TypeMark, (string)fl.TypeName, (double)fl.CoverageArea_m2));
                 }
             }
             else if (category == "Ceiling" && roomResult.CeilingFinishLayers != null)
             {
                 foreach (dynamic fl in roomResult.CeilingFinishLayers)
                 {
-                    result.Add(Tuple.Create((string)fl.TypeName, (double)fl.CoverageArea_m2));
+                    result.Add(Tuple.Create((string)fl.TypeMark, (string)fl.TypeName, (double)fl.CoverageArea_m2));
                 }
             }
 
-            return result;
+            return result
+                .GroupBy(t => new { Mark = t.Item1, Name = t.Item2 })
+                .Select(g => Tuple.Create(g.Key.Mark, g.Key.Name, Math.Round(g.Sum(t => t.Item3), 2)))
+                .ToList();
         }
 
         #endregion

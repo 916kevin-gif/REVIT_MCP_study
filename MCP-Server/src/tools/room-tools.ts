@@ -72,4 +72,15 @@ export const roomTools: Tool[] = [
             required: ["includeFinishLayers"],
         },
     },
+    {
+        name: "create_finish_legend",
+        description: "在 Revit 中自動建立粉刷／油漆材料填滿圖例。同時偵測兩種資料來源：(1) 全專案房間的粉刷層（CompoundStructure Function=Finish）、(2) 被「油漆工具」塗在 Wall/Floor/Ceiling 的材料（依面法向量分類牆/地/天）。為每種材料建立 FilledRegionType 並在 Legend 視圖中繪製三張表（地坪/牆面/天花）。每張表三欄：編號 | 圖例 | 說明；粉刷類型使用 TypeMark/TypeName，油漆材料使用 Material.Mark/Description（空值顯示『(未填)』）。粉刷列在上、油漆列在下，中間以分隔列隔開。前提：專案必須已有任一 Legend 視圖（即使空白）作為複製模板，因 Revit API 不允許直接建立 Legend。版面固定（1:100 比例，欄寬 130/120/650 cm、列高 50 cm）。",
+        inputSchema: {
+            type: "object",
+            properties: {
+                legendName: { type: "string", description: "新 Legend 視圖名稱（選填，預設『粉刷圖例_yyyyMMdd』）" },
+                legendTemplateName: { type: "string", description: "指定要複製的 Legend 名稱（選填，預設取專案第一個 Legend）" },
+            },
+        },
+    },
 ];
