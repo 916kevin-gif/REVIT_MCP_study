@@ -1,7 +1,11 @@
 ---
-trigger: [粉刷圖例, 材料圖例, finish legend, material legend, 填滿樣式, fill pattern legend, 圖例表, surface pattern legend, 油漆, paint, 塗料]
+name: finish-legend-creation
+description: 自動建立粉刷層與油漆材料填滿圖例 Legend 視圖。掃描全專案 Wall/Floor/Ceiling 的 CompoundStructure 粉刷層，以及用「油漆工具」塗色的面，輸出地坪／牆面／天花三張圖例表。觸發條件：粉刷圖例、finish legend、材料圖例、fill pattern legend、油漆材料、paint。
+tags: [粉刷圖例, 材料圖例, finish legend, material legend, 填滿樣式, fill pattern legend, 圖例表, surface pattern legend, 油漆, paint, 塗料]
 tools: [create_finish_legend, get_room_surface_areas]
-version: 1.1
+revit_versions: [2022, 2023, 2024, 2025, 2026]
+version: 1.2
+last_updated: 2026-04-22
 ---
 
 # 粉刷／油漆材料圖例自動建立
