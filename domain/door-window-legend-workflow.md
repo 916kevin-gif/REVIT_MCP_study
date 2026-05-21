@@ -2,7 +2,7 @@
 name: door-window-legend-workflow
 description: 門窗圖例表 seed-based Legend Component 建立流程，主入口為 door-window-legend-tools，缺少 seed 時透過 list_seeds 取得候選並等待使用者選擇。
 metadata:
-  version: "1.3"
+  version: "1.4"
   updated: "2026-05-21"
   created: "2026-05-20"
   references: []
@@ -124,10 +124,19 @@ create 若缺少 `seedLegendViewId`，回傳：
 
 這樣可以避免 Revit cascade delete 把新生成的 Legend Component 一起刪掉。
 
+注意：
+
+- 這版清理是「逐一嘗試刪除」，不是保證完全清空 seed 原始內容。
+- 若某個 seed 原始元素會連帶刪掉新生成元素，該筆會被 skip 並保留。
+- 因此最終圖例視圖可能仍殘留部分 seed 原始元素，這是目前部署版的預期保護行為。
+
 ## 錯誤規則
 
+- `create_mode_requires_layout_direction_and_max_per_line`：create 缺少 `layoutDirection` 或 `maxPerLine`，或數值不合法。
+- `invalid_seed_type`：`list_seeds` 的 `seedType` 不是 `legend`。
 - `legend_seed_view_not_found`：指定 seed view 不存在、不是 Legend，或是 template。
 - `legend_seed_component_not_found`：指定 seed view 沒有任何 Legend Component。
+- `legend_seed_component_type_mismatch`：seed view 存在且有 Legend Component，但 duplicated view 內找不到可讀取的 source component，或建立流程在 seed/source component 階段失敗。
 - `legend_component_type_swap_failed`：copy 後無法設定成目標 door/window type。
 
 若指定 seed 失敗：
@@ -153,3 +162,17 @@ create 成功時回傳：
 - `CleanupSkippedOriginalIds[]`
 - `CleanupProtectedElementCount`
 - `CleanupDeletedElementIds[]`
+- `CleanupSkipped`
+- `CleanupReason`
+- `SeedOriginalElementCount`
+- `GeneratedElementCount`
+- `FinalViewElementCountBeforeCleanup`
+- `FinalViewElementCountAfterCleanup`
+- `AttemptDebug`
+- `DuplicatedViewDebug`
+
+create 失敗時可能額外回傳：
+
+- `SeedViewDebug`
+- `DuplicatedViewDebug`
+- `AttemptDebug`
