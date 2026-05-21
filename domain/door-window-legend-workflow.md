@@ -2,7 +2,7 @@
 name: door-window-legend-workflow
 description: 門窗圖例表 seed-based Legend Component 建立流程，主入口為 door-window-legend-tools，缺少 seed 時透過 list_seeds 取得候選並等待使用者選擇。
 metadata:
-  version: "1.4"
+  version: "1.5"
   updated: "2026-05-21"
   created: "2026-05-20"
   references: []
@@ -26,7 +26,9 @@ metadata:
 - `mode=list`：列出專案中已放置實例使用到的 door/window type。
 - `mode=create`：使用指定的 seed Legend 視圖建立門表或窗表。
 - 若 create 缺少 seed，tool 必須回 workflow state，對話層再呼叫 `list_seeds` 並等待使用者選擇。
+- 若 create 缺少 `layoutDirection` 或 `maxPerLine`，tool 必須回 workflow state，要求對話層詢問使用者。
 - 不得自動選 seed。
+- 不得自動補排版方向或每排/欄數量。
 - 不得自動輪流測試 seed。
 
 ## Tool Contract
@@ -52,6 +54,28 @@ create 若缺少 `seedLegendViewId`，回傳：
 - `PromptToUser = "請先從 list_seeds 的結果中選擇一個 ViewName 作為 seed。"`
 
 此狀態不是錯誤，也不是 fallback 訊號。對話層只能呼叫 `list_seeds` 後停下來問使用者。
+
+create 若 seed 已有，但缺少 `layoutDirection` 或 `maxPerLine`，回傳：
+
+- `WorkflowState = "awaiting_layout_preferences"`
+- `NextAction = "ask_layout_preferences"`
+- `RequiresUserInput = true`
+- `DoNotAutoAssignLayout = true`
+- `DoNotRetryCreateWithoutLayout = true`
+- `MissingFields`
+- `PromptToUser = "請選擇排版方向（horizontal 或 vertical），並提供每排/欄數量（maxPerLine）。"`
+
+create 若 `layoutDirection` 或 `maxPerLine` 有值但不合法，回傳：
+
+- `WorkflowState = "awaiting_valid_layout_preferences"`
+- `NextAction = "ask_layout_preferences"`
+- `RequiresUserInput = true`
+- `DoNotAutoAssignLayout = true`
+- `DoNotRetryCreateWithoutLayout = true`
+- `InvalidFields`
+- `PromptToUser = "請提供有效的排版方向（horizontal 或 vertical），以及大於等於 1 的 maxPerLine。"`
+
+只有 `seedLegendViewId`、`layoutDirection`、`maxPerLine` 三者都齊全且合法時，才會進入 Revit 建立流程。
 
 ### `list_seeds`
 
@@ -94,7 +118,14 @@ create 若缺少 `seedLegendViewId`，回傳：
 
 ## 建立流程
 
-指定 `seedLegendViewId` 後：
+create 前置 gating：
+
+1. 若缺 `seedLegendViewId`，回 `awaiting_seed_selection`。
+2. 若 seed 已有，但缺 `layoutDirection` 或 `maxPerLine`，回 `awaiting_layout_preferences`。
+3. 若 seed 已有，但 `layoutDirection` 或 `maxPerLine` 不合法，回 `awaiting_valid_layout_preferences`。
+4. 只有必要參數齊全且合法，才進入下列建立流程。
+
+正式建立流程：
 
 1. 驗證 view 存在、是 `Legend`、不是 template。
 2. 用 `ViewDuplicateOption.WithDetailing` 複製 seed Legend。
@@ -138,6 +169,8 @@ create 若缺少 `seedLegendViewId`，回傳：
 - `legend_seed_component_not_found`：指定 seed view 沒有任何 Legend Component。
 - `legend_seed_component_type_mismatch`：seed view 存在且有 Legend Component，但 duplicated view 內找不到可讀取的 source component，或建立流程在 seed/source component 階段失敗。
 - `legend_component_type_swap_failed`：copy 後無法設定成目標 door/window type。
+
+其中 `create_mode_requires_layout_direction_and_max_per_line` 在目前流程中屬於內部 fallback validation，不是正常互動主路徑；正常互動應優先回 `awaiting_layout_preferences` 或 `awaiting_valid_layout_preferences`。
 
 若指定 seed 失敗：
 

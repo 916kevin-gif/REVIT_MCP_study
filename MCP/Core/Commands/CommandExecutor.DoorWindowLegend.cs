@@ -19,6 +19,8 @@ namespace RevitMCP.Core
     {
         private const string AwaitingSeedSelectionState = "awaiting_seed_selection";
         private const string AwaitingUserChoiceState = "awaiting_user_choice";
+        private const string AwaitingLayoutPreferencesState = "awaiting_layout_preferences";
+        private const string AwaitingValidLayoutPreferencesState = "awaiting_valid_layout_preferences";
         private const string MissingCreateLayoutError = "create_mode_requires_layout_direction_and_max_per_line";
         private const string InvalidSeedTypeError = "invalid_seed_type";
         private const string LegendSeedViewNotFoundError = "legend_seed_view_not_found";
@@ -54,13 +56,6 @@ namespace RevitMCP.Core
             int? maxPerLine = parameters?["maxPerLine"]?.Value<int?>();
             IdType? seedLegendViewId = parameters?["seedLegendViewId"]?.Value<IdType?>();
 
-            if ((layoutDirection != "horizontal" && layoutDirection != "vertical")
-                || !maxPerLine.HasValue
-                || maxPerLine.Value < 1)
-            {
-                throw new Exception(MissingCreateLayoutError);
-            }
-
             if (!seedLegendViewId.HasValue)
             {
                 return new
@@ -75,6 +70,52 @@ namespace RevitMCP.Core
                     DoNotRetryWithOtherSeeds = true,
                     PromptToUser = "請先從 list_seeds 的結果中選擇一個 ViewName 作為 seed。",
                     Message = "建立門表或窗表前，需要先選擇 seed Legend 視圖。",
+                };
+            }
+
+            List<string> missingFields = new List<string>();
+            if (string.IsNullOrWhiteSpace(layoutDirection))
+                missingFields.Add("layoutDirection");
+            if (!maxPerLine.HasValue)
+                missingFields.Add("maxPerLine");
+
+            if (missingFields.Count > 0)
+            {
+                return new
+                {
+                    TargetType = targetType,
+                    DisplayName = GetDoorWindowDisplayName(targetType),
+                    WorkflowState = AwaitingLayoutPreferencesState,
+                    NextAction = "ask_layout_preferences",
+                    RequiresUserInput = true,
+                    DoNotAutoAssignLayout = true,
+                    DoNotRetryCreateWithoutLayout = true,
+                    MissingFields = missingFields,
+                    PromptToUser = "請選擇排版方向（horizontal 或 vertical），並提供每排/欄數量（maxPerLine）。",
+                    Message = "建立門表或窗表前，需要先提供排版方向與每排/欄數量。",
+                };
+            }
+
+            List<string> invalidFields = new List<string>();
+            if (layoutDirection != "horizontal" && layoutDirection != "vertical")
+                invalidFields.Add("layoutDirection");
+            if (maxPerLine.Value < 1)
+                invalidFields.Add("maxPerLine");
+
+            if (invalidFields.Count > 0)
+            {
+                return new
+                {
+                    TargetType = targetType,
+                    DisplayName = GetDoorWindowDisplayName(targetType),
+                    WorkflowState = AwaitingValidLayoutPreferencesState,
+                    NextAction = "ask_layout_preferences",
+                    RequiresUserInput = true,
+                    DoNotAutoAssignLayout = true,
+                    DoNotRetryCreateWithoutLayout = true,
+                    InvalidFields = invalidFields,
+                    PromptToUser = "請提供有效的排版方向（horizontal 或 vertical），以及大於等於 1 的 maxPerLine。",
+                    Message = "排版參數無效，請重新提供 layoutDirection 與 maxPerLine。",
                 };
             }
 

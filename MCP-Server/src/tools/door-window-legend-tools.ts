@@ -4,7 +4,7 @@ export const doorWindowLegendTools: Tool[] = [
     {
         name: "door-window-legend-tools",
         description:
-            "門窗圖例工具。mode=list 會列出專案中已放置實例使用到的 door/window types。mode=create 會建立門表或窗表。create 若缺少 seedLegendViewId，只會回傳 awaiting_seed_selection workflow state；assistant 必須接著呼叫 list_seeds，列出 seed 候選後停下來詢問使用者，不得自動選 seed，也不得自動輪流測試其他 seed。",
+            "門窗圖例工具。mode=list 會列出專案中已放置實例使用到的 door/window types。mode=create 會建立門表或窗表。create 若缺少 seedLegendViewId，會回傳 awaiting_seed_selection；若缺少或提供了無效的 layoutDirection / maxPerLine，會回傳 awaiting_layout_preferences 或 awaiting_valid_layout_preferences。assistant 必須停下來詢問使用者，不得自動補 seed 或排版參數。",
         inputSchema: {
             type: "object",
             properties: {
