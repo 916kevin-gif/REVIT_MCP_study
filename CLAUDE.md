@@ -34,7 +34,7 @@ These counts must be derived from source, not copied by memory.
 | Item | Current Count | Source of Truth |
 |---|---:|---|
 | Runtime MCP tools | 147 | `registerRevitTools()` from `MCP-Server/src/tools/index.ts` |
-| Domain SOP files | 61 | `domain/*.md` except `domain/README.md`, plus `domain/references/*.md` |
+| Domain SOP files | 62 | `domain/*.md` except `domain/README.md`, plus `domain/references/*.md` |
 | Claude skills | 42 | `.claude/skills/*/SKILL.md` |
 
 When these numbers change, update `CLAUDE.md`, `README.md`, `README.zh-TW.md`, `docs/DOCUMENT_AUDIENCE_INVENTORY.md`, and any public site copy that makes grand-total claims. Then run `scripts/verify-qaqc.ps1 -SkipBuild -SkipDeploy`.
@@ -230,6 +230,7 @@ Read the matching file before applying a workflow or calculation.
 | auto dimension, ray cast, dimension workflow | `domain/auto-dimension-workflow.md` |
 | corridor, escape route, egress route, corridor analysis | `domain/corridor-analysis-protocol.md` |
 | curtain wall, panel pattern, curtain panel | `domain/curtain-wall-pattern.md` |
+| curtain wall elevation, curtain schedule, curtain wall legend, 帷幕立面, 帷幕表, create_curtain_wall_elevations | `domain/curtain-wall-elevation-workflow.md` |
 | daylight, daylight area, natural lighting | `domain/daylight-area-check.md` |
 | dependent view, crop, grid crop, view split | `domain/dependent-view-crop-workflow.md` |
 | dwg, cad, 柱匯入, 圖層建柱, 批次建柱, column from dwg, 柱號對應, 柱名稱對應, textLayerName | `domain/dwg-column-import.md` |
