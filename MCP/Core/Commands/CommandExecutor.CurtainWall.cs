@@ -219,6 +219,471 @@ namespace RevitMCP.Core
         }
 
         /// <summary>
+        /// 建立每一道帷幕牆的外立面視圖，並套用「帷幕立面」視圖樣板。
+        /// </summary>
+        private object CreateCurtainWallElevations(JObject parameters)
+        {
+            Document doc = _uiApp.ActiveUIDocument.Document;
+            UIDocument uidoc = _uiApp.ActiveUIDocument;
+
+            int scale = parameters["scale"]?.Value<int>() ?? 50;
+            double offsetFt = (parameters["offsetMm"]?.Value<double>() ?? 1500.0) / 304.8;
+            double horizontalMarginFt = (parameters["horizontalMarginMm"]?.Value<double>() ?? 300.0) / 304.8;
+            double verticalMarginFt = (parameters["verticalMarginMm"]?.Value<double>() ?? 300.0) / 304.8;
+            double depthFt = (parameters["depthMm"]?.Value<double>() ?? 1200.0) / 304.8;
+            string viewTemplateName = parameters["viewTemplateName"]?.Value<string>() ?? "帷幕立面";
+            bool applyViewTemplate = parameters["applyViewTemplate"]?.Value<bool>() ?? true;
+            string nameSeparator = parameters["nameSeparator"]?.Value<string>() ?? "";
+            bool dryRun = parameters["dryRun"]?.Value<bool>() ?? false;
+
+            ViewFamilyType elevationType = new FilteredElementCollector(doc)
+                .OfClass(typeof(ViewFamilyType))
+                .Cast<ViewFamilyType>()
+                .FirstOrDefault(vft => vft.ViewFamily == ViewFamily.Elevation);
+
+            if (elevationType == null)
+                throw new Exception("找不到 Elevation 的 ViewFamilyType");
+
+            ViewPlan explicitPlacementView = ResolveCurtainElevationPlacementView(doc, parameters);
+            Dictionary<ElementId, ViewPlan> floorPlansByLevel = GetCurtainElevationFloorPlansByLevel(doc);
+            ViewPlan activePlan = uidoc.ActiveView as ViewPlan;
+            if (activePlan != null && activePlan.IsTemplate)
+                activePlan = null;
+
+            var existingNames = new HashSet<string>(
+                new FilteredElementCollector(doc)
+                    .OfClass(typeof(View))
+                    .Cast<View>()
+                    .Select(v => v.Name));
+
+            List<Wall> curtainWalls = new FilteredElementCollector(doc)
+                .OfClass(typeof(Wall))
+                .WhereElementIsNotElementType()
+                .Cast<Wall>()
+                .Where(w =>
+                {
+                    try { return w.CurtainGrid != null; }
+                    catch { return false; }
+                })
+                .OrderBy(w => w.LevelId.GetIdValue())
+                .ThenBy(w => w.Id.GetIdValue())
+                .ToList();
+
+            var created = new List<object>();
+            var skipped = new List<object>();
+            var createdViews = new List<(ViewSection View, Wall Wall)>();
+            var templateWarnings = new List<string>();
+            View viewTemplate = null;
+            bool templateCreated = false;
+            bool templateUpdated = false;
+
+            if (dryRun)
+            {
+                foreach (Wall wall in curtainWalls)
+                {
+                    Level level = doc.GetElement(wall.LevelId) as Level;
+                    string levelName = level?.Name ?? "未指定樓層";
+                    string mark = GetCurtainWallMark(wall);
+                    string viewName = MakeUniqueCurtainElevationViewName(existingNames, $"{levelName}{nameSeparator}{mark}");
+
+                    created.Add(new
+                    {
+                        WallId = wall.Id.GetIdValue(),
+                        ViewId = (IdType)0,
+                        ViewName = viewName,
+                        LevelName = levelName,
+                        Mark = mark,
+                        MarkerId = (IdType)0,
+                        DryRun = true
+                    });
+                }
+
+                return new
+                {
+                    Success = true,
+                    DryRun = true,
+                    TotalCurtainWalls = curtainWalls.Count,
+                    CreatedCount = created.Count,
+                    SkippedCount = skipped.Count,
+                    ViewTemplateId = (IdType)0,
+                    ViewTemplateName = viewTemplateName,
+                    TemplateCreated = false,
+                    TemplateUpdated = false,
+                    Created = created,
+                    Skipped = skipped,
+                    TemplateWarnings = templateWarnings
+                };
+            }
+
+            using (Transaction trans = TransactionHelper.Begin(doc, "建立帷幕牆外立面視圖"))
+            {
+                trans.Start();
+
+                foreach (Wall wall in curtainWalls)
+                {
+                    Level level = doc.GetElement(wall.LevelId) as Level;
+                    string levelName = level?.Name ?? "未指定樓層";
+                    string mark = GetCurtainWallMark(wall);
+
+                    try
+                    {
+                        LocationCurve loc = wall.Location as LocationCurve;
+                        if (loc == null)
+                        {
+                            skipped.Add(new { WallId = wall.Id.GetIdValue(), LevelName = levelName, Mark = mark, Reason = "牆沒有 LocationCurve" });
+                            continue;
+                        }
+
+                        BoundingBoxXYZ wallBox = wall.get_BoundingBox(null);
+                        if (wallBox == null)
+                        {
+                            skipped.Add(new { WallId = wall.Id.GetIdValue(), LevelName = levelName, Mark = mark, Reason = "無法取得牆 BoundingBox" });
+                            continue;
+                        }
+
+                        ViewPlan placementView = explicitPlacementView
+                            ?? ResolveCurtainElevationPlanForWall(wall, activePlan, floorPlansByLevel);
+                        if (placementView == null)
+                        {
+                            skipped.Add(new { WallId = wall.Id.GetIdValue(), LevelName = levelName, Mark = mark, Reason = "找不到可放置 ElevationMarker 的平面視圖" });
+                            continue;
+                        }
+
+                        XYZ wallMid = loc.Curve.Evaluate(0.5, true);
+                        XYZ outward = FlattenAndNormalize(wall.Orientation);
+                        if (outward == null)
+                        {
+                            skipped.Add(new { WallId = wall.Id.GetIdValue(), LevelName = levelName, Mark = mark, Reason = "無法判斷 wall.Orientation" });
+                            continue;
+                        }
+
+                        XYZ markerPoint = wallMid + outward * (wall.Width / 2.0 + offsetFt);
+                        string viewName = MakeUniqueCurtainElevationViewName(existingNames, $"{levelName}{nameSeparator}{mark}");
+
+                        ElevationMarker marker = ElevationMarker.CreateElevationMarker(doc, elevationType.Id, markerPoint, scale);
+                        ViewSection elevationView = marker.CreateElevation(doc, placementView.Id, 0);
+                        AlignCurtainElevationMarker(doc, marker, markerPoint, elevationView, outward.Negate());
+
+                        elevationView.Name = viewName;
+                        elevationView.Scale = scale;
+                        ConfigureCurtainElevationCrop(elevationView, wall, horizontalMarginFt, verticalMarginFt, depthFt);
+                        ConfigureCurtainElevationFarClip(elevationView, depthFt);
+
+                        createdViews.Add((elevationView, wall));
+                        created.Add(new
+                        {
+                            WallId = wall.Id.GetIdValue(),
+                            ViewId = elevationView.Id.GetIdValue(),
+                            ViewName = elevationView.Name,
+                            LevelName = levelName,
+                            Mark = mark,
+                            MarkerId = marker.Id.GetIdValue()
+                        });
+                    }
+                    catch (Exception ex)
+                    {
+                        skipped.Add(new { WallId = wall.Id.GetIdValue(), LevelName = levelName, Mark = mark, Reason = ex.Message });
+                    }
+                }
+
+                if (applyViewTemplate && createdViews.Count > 0)
+                {
+                    viewTemplate = FindCurtainElevationViewTemplate(doc, viewTemplateName);
+                    if (viewTemplate == null)
+                    {
+                        viewTemplate = createdViews[0].View.CreateViewTemplate();
+                        viewTemplate.Name = viewTemplateName;
+                        templateCreated = true;
+                    }
+
+                    ConfigureCurtainElevationViewTemplate(doc, viewTemplate, templateWarnings);
+                    templateUpdated = true;
+
+                    foreach (var item in createdViews)
+                    {
+                        item.View.ViewTemplateId = viewTemplate.Id;
+                        ConfigureCurtainElevationCrop(item.View, item.Wall, horizontalMarginFt, verticalMarginFt, depthFt);
+                        ConfigureCurtainElevationFarClip(item.View, depthFt);
+                    }
+                }
+
+                trans.Commit();
+            }
+
+            return new
+            {
+                Success = true,
+                DryRun = false,
+                TotalCurtainWalls = curtainWalls.Count,
+                CreatedCount = created.Count,
+                SkippedCount = skipped.Count,
+                ViewTemplateId = viewTemplate?.Id.GetIdValue() ?? 0,
+                ViewTemplateName = viewTemplate?.Name ?? viewTemplateName,
+                TemplateCreated = templateCreated,
+                TemplateUpdated = templateUpdated,
+                Created = created,
+                Skipped = skipped,
+                TemplateWarnings = templateWarnings
+            };
+        }
+
+        private string GetCurtainWallMark(Wall wall)
+        {
+            string mark = wall.get_Parameter(BuiltInParameter.ALL_MODEL_MARK)?.AsString();
+            return string.IsNullOrWhiteSpace(mark) ? $"CW-{wall.Id.GetIdValue()}" : mark.Trim();
+        }
+
+        private ViewPlan ResolveCurtainElevationPlacementView(Document doc, JObject parameters)
+        {
+            IdType placementViewId = parameters["placementViewId"]?.Value<IdType>() ?? 0;
+            string placementViewName = parameters["placementViewName"]?.Value<string>();
+
+            if (placementViewId != 0)
+            {
+                ViewPlan view = doc.GetElement(new ElementId(placementViewId)) as ViewPlan;
+                if (view == null || view.IsTemplate)
+                    throw new Exception($"placementViewId {placementViewId} 不是可用的 ViewPlan");
+                return view;
+            }
+
+            if (!string.IsNullOrWhiteSpace(placementViewName))
+            {
+                ViewPlan view = new FilteredElementCollector(doc)
+                    .OfClass(typeof(ViewPlan))
+                    .Cast<ViewPlan>()
+                    .FirstOrDefault(v => !v.IsTemplate && v.Name == placementViewName);
+                if (view == null)
+                    throw new Exception($"找不到 placementViewName 指定的 ViewPlan: {placementViewName}");
+                return view;
+            }
+
+            return null;
+        }
+
+        private Dictionary<ElementId, ViewPlan> GetCurtainElevationFloorPlansByLevel(Document doc)
+        {
+            var result = new Dictionary<ElementId, ViewPlan>();
+            foreach (ViewPlan view in new FilteredElementCollector(doc).OfClass(typeof(ViewPlan)).Cast<ViewPlan>())
+            {
+                if (view.IsTemplate || view.ViewType != ViewType.FloorPlan || view.GenLevel == null)
+                    continue;
+                if (!result.ContainsKey(view.GenLevel.Id))
+                    result[view.GenLevel.Id] = view;
+            }
+            return result;
+        }
+
+        private ViewPlan ResolveCurtainElevationPlanForWall(Wall wall, ViewPlan activePlan, Dictionary<ElementId, ViewPlan> floorPlansByLevel)
+        {
+            if (activePlan != null && activePlan.ViewType == ViewType.FloorPlan)
+                return activePlan;
+            if (floorPlansByLevel.TryGetValue(wall.LevelId, out ViewPlan plan))
+                return plan;
+            return null;
+        }
+
+        private string MakeUniqueCurtainElevationViewName(HashSet<string> existingNames, string baseName)
+        {
+            baseName = string.IsNullOrWhiteSpace(baseName) ? "帷幕立面" : baseName.Trim();
+            if (existingNames.Add(baseName))
+                return baseName;
+
+            for (int i = 2; i < 10000; i++)
+            {
+                string candidate = $"{baseName}_{i}";
+                if (existingNames.Add(candidate))
+                    return candidate;
+            }
+
+            string fallback = $"{baseName}_{DateTime.Now:HHmmss}";
+            existingNames.Add(fallback);
+            return fallback;
+        }
+
+        private XYZ FlattenAndNormalize(XYZ vector)
+        {
+            if (vector == null)
+                return null;
+            XYZ flat = new XYZ(vector.X, vector.Y, 0);
+            return flat.GetLength() < 1e-9 ? null : flat.Normalize();
+        }
+
+        private void AlignCurtainElevationMarker(Document doc, ElevationMarker marker, XYZ origin, ViewSection view, XYZ desiredViewDirection)
+        {
+            XYZ current = FlattenAndNormalize(view.ViewDirection);
+            XYZ desired = FlattenAndNormalize(desiredViewDirection);
+            if (current == null || desired == null)
+                return;
+
+            double dot = Math.Max(-1.0, Math.Min(1.0, current.DotProduct(desired)));
+            double crossZ = current.CrossProduct(desired).Z;
+            double angle = Math.Atan2(crossZ, dot);
+            if (Math.Abs(angle) < 1e-9)
+                return;
+
+            Line axis = Line.CreateBound(origin, origin + XYZ.BasisZ);
+            ElementTransformUtils.RotateElement(doc, marker.Id, axis, angle);
+        }
+
+        private void ConfigureCurtainElevationCrop(ViewSection view, Wall wall, double horizontalMarginFt, double verticalMarginFt, double depthFt)
+        {
+            if (view == null || wall == null)
+                return;
+
+            BoundingBoxXYZ crop = view.CropBox;
+            BoundingBoxXYZ wallBox = wall.get_BoundingBox(null);
+            if (crop == null || wallBox == null)
+                return;
+
+            Transform inverse = crop.Transform.Inverse;
+            List<XYZ> points = GetCurtainElevationBoundingPoints(wallBox);
+
+            double minX = double.MaxValue;
+            double minY = double.MaxValue;
+            double maxX = double.MinValue;
+            double maxY = double.MinValue;
+
+            foreach (XYZ point in points)
+            {
+                XYZ local = inverse.OfPoint(point);
+                minX = Math.Min(minX, local.X);
+                minY = Math.Min(minY, local.Y);
+                maxX = Math.Max(maxX, local.X);
+                maxY = Math.Max(maxY, local.Y);
+            }
+
+            if (minX == double.MaxValue)
+                return;
+
+            view.CropBoxActive = true;
+            view.CropBoxVisible = false;
+            view.CropBox = new BoundingBoxXYZ
+            {
+                Transform = crop.Transform,
+                Min = new XYZ(minX - horizontalMarginFt, minY - verticalMarginFt, crop.Min.Z),
+                Max = new XYZ(maxX + horizontalMarginFt, maxY + verticalMarginFt, Math.Max(crop.Max.Z, crop.Min.Z + depthFt))
+            };
+        }
+
+        private List<XYZ> GetCurtainElevationBoundingPoints(BoundingBoxXYZ box)
+        {
+            return new List<XYZ>
+            {
+                new XYZ(box.Min.X, box.Min.Y, box.Min.Z),
+                new XYZ(box.Min.X, box.Min.Y, box.Max.Z),
+                new XYZ(box.Min.X, box.Max.Y, box.Min.Z),
+                new XYZ(box.Min.X, box.Max.Y, box.Max.Z),
+                new XYZ(box.Max.X, box.Min.Y, box.Min.Z),
+                new XYZ(box.Max.X, box.Min.Y, box.Max.Z),
+                new XYZ(box.Max.X, box.Max.Y, box.Min.Z),
+                new XYZ(box.Max.X, box.Max.Y, box.Max.Z)
+            };
+        }
+
+        private void ConfigureCurtainElevationFarClip(ViewSection view, double depthFt)
+        {
+            SetViewParameterByBuiltInName(view, "VIEWER_BOUND_ACTIVE", 1);
+            SetViewParameterByBuiltInName(view, "VIEWER_BOUND_OFFSET", depthFt);
+        }
+
+        private void SetViewParameterByBuiltInName(View view, string builtInParameterName, double value)
+        {
+            if (!Enum.TryParse(builtInParameterName, out BuiltInParameter bip))
+                return;
+
+            Parameter parameter = view.get_Parameter(bip);
+            if (parameter == null || parameter.IsReadOnly)
+                return;
+
+            if (parameter.StorageType == StorageType.Double)
+                parameter.Set(value);
+            else if (parameter.StorageType == StorageType.Integer)
+                parameter.Set((int)Math.Round(value));
+        }
+
+        private View FindCurtainElevationViewTemplate(Document doc, string templateName)
+        {
+            return new FilteredElementCollector(doc)
+                .OfClass(typeof(View))
+                .Cast<View>()
+                .FirstOrDefault(v => v.IsTemplate && v.Name == templateName);
+        }
+
+        private void ConfigureCurtainElevationViewTemplate(Document doc, View template, List<string> warnings)
+        {
+            var keepCategories = new HashSet<ElementId>
+            {
+                new ElementId((IdType)(int)BuiltInCategory.OST_Walls),
+                new ElementId((IdType)(int)BuiltInCategory.OST_CurtainWallPanels),
+                new ElementId((IdType)(int)BuiltInCategory.OST_CurtainWallMullions),
+                new ElementId((IdType)(int)BuiltInCategory.OST_Levels),
+                new ElementId((IdType)(int)BuiltInCategory.OST_WallTags)
+            };
+
+            foreach (Category category in doc.Settings.Categories)
+            {
+                if (category == null)
+                    continue;
+                if (category.CategoryType != CategoryType.Model && category.CategoryType != CategoryType.Annotation)
+                    continue;
+
+                TrySetCurtainTemplateCategoryHidden(template, category.Id, true, warnings);
+            }
+
+            foreach (ElementId id in keepCategories)
+            {
+                TrySetCurtainTemplateCategoryHidden(template, id, false, warnings);
+            }
+
+            ExcludeCurtainElevationCropAndFarClipFromTemplate(template, warnings);
+        }
+
+        private void TrySetCurtainTemplateCategoryHidden(View template, ElementId categoryId, bool hidden, List<string> warnings)
+        {
+            try
+            {
+                if (template.CanCategoryBeHidden(categoryId))
+                    template.SetCategoryHidden(categoryId, hidden);
+            }
+            catch (Exception ex)
+            {
+                warnings.Add($"Category {categoryId.GetIdValue()} visibility skipped: {ex.Message}");
+            }
+        }
+
+        private void ExcludeCurtainElevationCropAndFarClipFromTemplate(View template, List<string> warnings)
+        {
+            try
+            {
+                HashSet<ElementId> allTemplateParams = template.GetTemplateParameterIds().ToHashSet();
+                HashSet<ElementId> nonControlled = template.GetNonControlledTemplateParameterIds().ToHashSet();
+
+                foreach (BuiltInParameter bip in Enum.GetValues(typeof(BuiltInParameter)))
+                {
+                    string name = bip.ToString();
+                    bool isCropOrFarClip =
+                        name.IndexOf("CROP", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                        name.IndexOf("VIEWER_BOUND", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                        name.IndexOf("FAR_CLIP", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                        name.IndexOf("CLIPPING", StringComparison.OrdinalIgnoreCase) >= 0;
+
+                    if (!isCropOrFarClip)
+                        continue;
+
+                    ElementId paramId = new ElementId((IdType)(int)bip);
+                    if (allTemplateParams.Contains(paramId))
+                        nonControlled.Add(paramId);
+                }
+
+                template.SetNonControlledTemplateParameterIds(nonControlled);
+            }
+            catch (Exception ex)
+            {
+                warnings.Add($"View template non-controlled crop/far clip parameters skipped: {ex.Message}");
+            }
+        }
+
+        /// <summary>
         /// 建立新的帷幕面板類型（含材料）
         /// </summary>
         private object CreateCurtainPanelType(JObject parameters)

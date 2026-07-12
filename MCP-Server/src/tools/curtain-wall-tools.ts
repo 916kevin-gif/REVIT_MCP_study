@@ -52,6 +52,26 @@ export const curtainWallTools: Tool[] = [
         },
     },
     {
+        name: "create_curtain_wall_elevations",
+        description: "批次建立每一道帷幕牆的外立面視圖，建立/套用名為「帷幕立面」的視圖樣板，並保留 crop box 與 far clip depth 可由各視圖自行控制。",
+        inputSchema: {
+            type: "object",
+            properties: {
+                placementViewId: { type: "number", description: "放置 ElevationMarker 的 ViewPlan ElementId；優先於 placementViewName。" },
+                placementViewName: { type: "string", description: "放置 ElevationMarker 的 ViewPlan 名稱。" },
+                scale: { type: "number", description: "立面視圖比例，預設 50。", default: 50 },
+                offsetMm: { type: "number", description: "marker 放在牆外側的距離，單位 mm，預設 1500。", default: 1500 },
+                horizontalMarginMm: { type: "number", description: "crop 左右餘裕，單位 mm，預設 300。", default: 300 },
+                verticalMarginMm: { type: "number", description: "crop 上下餘裕，單位 mm，預設 300。", default: 300 },
+                depthMm: { type: "number", description: "遠剪裁深度，單位 mm，預設 1200。", default: 1200 },
+                viewTemplateName: { type: "string", description: "視圖樣板名稱，預設「帷幕立面」。", default: "帷幕立面" },
+                applyViewTemplate: { type: "boolean", description: "是否建立/套用視圖樣板，預設 true。", default: true },
+                nameSeparator: { type: "string", description: "樓層與標記之間的分隔字串，預設空字串。", default: "" },
+                dryRun: { type: "boolean", description: "只回報將建立的視圖，不修改模型，預設 false。", default: false },
+            },
+        },
+    },
+    {
         name: "create_facade_panel",
         description: "建立單片立面面板（DirectShape）。支援 5 種幾何：curved_panel、beveled_opening、angled_panel、rounded_opening、flat_panel。",
         inputSchema: {

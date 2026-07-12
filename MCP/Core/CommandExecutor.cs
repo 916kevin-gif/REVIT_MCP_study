@@ -315,6 +315,9 @@ namespace RevitMCP.Core
                     case "apply_panel_pattern":
                         result = ApplyPanelPattern(parameters);
                         break;
+                    case "create_curtain_wall_elevations":
+                        result = CreateCurtainWallElevations(parameters);
+                        break;
                     case "create_facade_panel":
                         result = CreateFacadePanel(parameters);
                         break;
