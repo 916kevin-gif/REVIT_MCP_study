@@ -78,8 +78,9 @@ dir
 | `verticalMarginMm` | number | `0` | crop 上下 margin；預設貼合帷幕 bounding box。 |
 | `depthMm` | number | `1200` | 無法由帷幕元素 bounding box 推算深度時的 fallback far clip depth。 |
 | `viewTemplateName` | string | `"帷幕立面"` | 要套用或建立的 View Template 名稱。 |
+| `elevationViewTypeName` | string | `"帷幕立面"` | 要使用或自動建立的立面圖類型名稱。 |
 | `applyViewTemplate` | boolean | `true` | 是否套用 View Template。 |
-| `nameSeparator` | string | `""` | `{LevelName}` 與 `{Mark}` 中間的分隔字串。 |
+| `nameSeparator` | string | `"-"` | `{LevelName}` 與 `{Mark}` 中間的分隔字串。 |
 | `dryRun` | boolean | `false` | 只預覽結果，不建立 view。 |
 
 ### Output
@@ -192,11 +193,24 @@ View name：
 {LevelName}{nameSeparator}{Mark}
 ```
 
+`nameSeparator` 預設為 `-`，因此標準視圖命名為：
+
+```text
+{LevelName}-{Mark}
+```
+
 重名時自動加：
 
 ```text
 _2, _3, _4 ...
 ```
+
+Elevation view type:
+
+- 預設使用 `elevationViewTypeName = "帷幕立面"`。
+- 若文件中已有同名 `ViewFamilyType` 且 `ViewFamily == Elevation`，直接使用。
+- 若不存在，從第一個可用 Elevation `ViewFamilyType` 複製建立一個新類型並命名為 `帷幕立面`。
+- 所有新建立的帷幕立面 view 都必須使用這個 view type。
 
 ### 3. Placement View Resolution
 
@@ -335,9 +349,66 @@ debug SOP：
 - `CropBoxActive = true`
 - `CropBoxVisible = false`
 - crop box 貼合帷幕所有相關元素在 elevation view 2D 畫面中的最小矩形範圍
-- `VIEWER_BOUND_ACTIVE = 1`
+- `VIEWER_BOUND_ACTIVE_FAR = 1`
 - `VIEWER_BOUND_FAR_CLIPPING = 2`，也就是 UI 的「剪裁含線」
-- `VIEWER_BOUND_OFFSET = autoDepthFt`
+- `VIEWER_BOUND_OFFSET_FAR = autoDepthFt`
+
+遠剪裁深度規則適用所有帷幕，不分水平、垂直或斜向。正式方法：
+
+```text
+FarClipMethod = view_origin_to_target_max_depth
+```
+
+計算方式：
+
+```csharp
+visualLookDirection = GetCurtainElevationVisualLookDirection(view);
+depth = (targetPoint - view.Origin).DotProduct(visualLookDirection);
+farClipDepthFt = Max(depth where depth > 0) + 50mm;
+```
+
+target points 使用與 crop 相同的目標帷幕元素集合：panels、mullions、hosted doors/windows/inserts；host wall 只作最後 fallback。
+
+不要用 `markerPoint` 到帷幕中心的距離當遠剪裁深度；marker offset 只是平面放置距離，不是 Revit `VIEWER_BOUND_OFFSET` 的起算基準。也不要用 `Abs(localMaxZ - localMinZ)`，那只代表帷幕本體厚度，不是從立面切平面到最遠目標點的 offset。`depthMm` 只允許在完全無法取得 target points、`view.Origin` 或 visual look direction 時當 fallback。
+
+遠剪裁正式控制來源是：
+
+- `VIEWER_BOUND_ACTIVE_FAR = 1`
+- `VIEWER_BOUND_FAR_CLIPPING = 2`
+- `VIEWER_BOUND_OFFSET_FAR = farClipDepthFt`
+
+不要用 `CropBox.Min.Z / CropBox.Max.Z` 判定 far clip 是否成功。實測顯示 elevation view 讀回的 `CropBox` Z depth 可能保留 Revit 內部視圖範圍，會出現 10m 以上的值，但不等於 UI 的「遠剪裁偏移」。`CropBox` Z 只能當診斷參考，不可當 `FarClipPass` 條件。
+
+Revit 2024 `BuiltInParameter` 的正確 enum 名稱是 `VIEWER_BOUND_ACTIVE_FAR` 與 `VIEWER_BOUND_OFFSET_FAR`。不要使用不存在的 `VIEWER_BOUND_ACTIVE` 或 `VIEWER_BOUND_OFFSET`，否則 readback 會是 `null`，且實際遠剪裁不會被設定。
+
+`Created[]` 需回傳 far clip 診斷欄位：
+
+- `FarClipMethod`
+- `FarClipDepthMm`
+- `FarClipRequestedDepthMm`
+- `FarClipActualOffsetMm`
+- `FarClipDepthOrigin`
+- `FarClipLookDirection`
+- `FarClipMinCandidateDepthMm`
+- `FarClipMaxCandidateDepthMm`
+- `FarClipPositivePointCount`
+- `FarClipWarning`
+- `FarClipMarginMm`
+- `FarClipNearestTargetMm`
+- `FarClipFarthestTargetMm`
+- `FarClipPointSource`
+- `FarClipExtremeContributor`
+- `FarClipCropBoxDepthApplied`
+- `FarClipCropBoxDepthMethod`
+- `FarClipViewOriginLocalZMm`
+- `FarClipLookDirectionLocalZ`
+- `FarClipCropBoxMinZBeforeMm`
+- `FarClipCropBoxMaxZBeforeMm`
+- `FarClipCropBoxMinZAfterMm`
+- `FarClipCropBoxMaxZAfterMm`
+- `FarClipCropBoxDepthAfterMm`
+- `FarClipDepthDeltaMm`
+- `FarClipPass`
 
 不要直接用 `element.get_BoundingBox(null)` 的 8 個角點當主要 crop 來源。`get_BoundingBox(null)` 是 world-axis-aligned bounding box；斜向帷幕會先被世界 X/Y 軸放大，再投影到立面座標，造成 crop 過寬。
 
@@ -387,7 +458,15 @@ host wall 只允許在完全沒有 panel / mullion / insert points 時作最後 
 
 只有當某個元素無法取得 geometry points 時，才 fallback 到該元素 `get_BoundingBox(null)` 的角點。所有點都必須先投影到 actual view crop frame 後再算 local min/max。
 
-`autoDepthFt = localMaxZ - localMinZ`，同樣使用 geometry-derived local Z 範圍。如果完全無法取得 geometry 或 bbox points，才使用 `depthMm` 當 fallback。
+遠剪裁深度不可使用 `Abs(localMaxZ - localMinZ)`。`VIEWER_BOUND_OFFSET_FAR` 必須從 `view.Origin` 沿 `GetCurtainElevationVisualLookDirection(view)` 量到目標帷幕元素最遠正向點，再加 50mm margin。`FarClipPass` 只比較 `VIEWER_BOUND_OFFSET_FAR` readback 與 expected depth；`CropBoxDepthAfterMm` 只用來診斷 Revit 內部 crop depth，不可當失敗依據。如果完全無法取得 geometry / bbox points、`view.Origin` 或 visual look direction，才使用 `depthMm` 當 fallback。
+
+每次修改 far clip 前先跑：
+
+```powershell
+.\scripts\test-curtain-elevation-geometry.ps1
+```
+
+這個測試不需要 Revit，會檢查水平、垂直、斜向、負深度 fallback、crop local Z 反向等 deterministic cases。
 
 `Created[]` 需回傳 crop 診斷欄位：
 
@@ -478,6 +557,8 @@ template 只保留這些 category visible：
 | `OST_Windows` | 以窗族實作的帷幕 panel |
 | `OST_Levels` | level lines |
 | `OST_WallTags` | wall tags |
+| `OST_Dimensions` | 自動建立的總寬、總高、網格間距尺寸 |
+| `OST_Lines` | 尺寸 fallback reference detail curves；實際線型應套 Invisible |
 
 ### Non-Controlled Template Parameters
 
@@ -678,18 +759,95 @@ Flipped = false -> opposite_orientation
 執行 tool 後檢查：
 
 - 每道 `CurtainGrid != null` 的 curtain wall 產生一張 elevation view。
-- view name 符合 `{LevelName}{nameSeparator}{Mark}`。
+- view name 符合 `{LevelName}-{Mark}`。
+- view type 名稱為 `帷幕立面`。
 - mark 空白 fallback 為 `CW-{ElementId}`。
 - 重名 fallback 為 `_2`, `_3`。
 - marker 在牆外側。
 - 黑色三角方向看回帷幕牆。
 - `Created[].DirectionDot` 應接近 `1.0`，至少 `>= 0.98`。
 - View Template 名稱為 `帷幕立面`。
-- template 只顯示 walls、curtain wall panels、curtain wall mullions、doors、windows、levels、wall tags。
+- template 只顯示 walls、curtain wall panels、curtain wall mullions、doors、windows、levels、wall tags、dimensions。
 - crop box 貼合帷幕 bounding box。
 - far clip mode 是「剪裁含線」。
 - crop box / far clip depth 不被 template 鎖住。
 - `Skipped[]` 有具體 reason，沒有 silent failure。
+
+## Dimension Annotation Rule
+
+`create_curtain_wall_elevations` 預設會在每張帷幕立面建立 Revit `Dimension`。沒有提供 `dimensionTypeId` 時，不得中斷立面生成，也不得要求使用者先選型；tool 會自行使用最近一次成功使用的標註類型、Revit 預設線性標註類型，或第一個可用 `DimensionType`。
+
+如果使用者明確要求先選標註類型，呼叫時設定：
+
+```json
+{
+  "dimensionTypeSelectionMode": "prompt"
+}
+```
+
+在 `prompt` 模式下，若沒有 `dimensionTypeId` / `dimensionTypeName`，tool 必須回傳 `WorkflowState = "awaiting_dimension_type_selection"` 與 `NextAction = "call_list_dimension_types"`，且不得建立任何 view。
+
+標註配置：
+
+- 上方第一道：總寬。
+- 上方第二道：水平帷幕網格間距。
+- 右側第一道：總高。
+- 右側第二道：垂直帷幕網格間距。
+
+尺寸依據使用已驗證的 elevation view 2D visible bounds：
+
+- X 軸使用 `view.RightDirection`。
+- Y 軸使用 `view.UpDirection`。
+- 總寬 / 總高使用 `Crop2DMin` / `Crop2DMax`。
+- 網格間距使用 curtain grid line 在同一個 view 2D frame 內的投影座標。
+
+Dimension type resolution 順序：
+
+1. `dimensionTypeId`
+2. `dimensionTypeName`
+3. current Revit/MCP process 最近一次成功使用的 curtain elevation dimension type
+4. Revit default linear `DimensionType`
+5. 第一個可用 `DimensionType`
+
+如果完全找不到 `DimensionType`，仍然建立帷幕立面，只略過尺寸並在 `DimensionWarnings[]` 回報。
+
+`Created[]` 需要回傳：
+
+- `DimensionsCreatedCount`
+- `DimensionsFailedCount`
+- `DimensionTypeId`
+- `DimensionTypeName`
+- `DimensionTypeSource`
+- `TotalWidthDimensionReferenceSource`
+- `TotalHeightDimensionReferenceSource`
+- `HorizontalGridDimensionReferenceSource`
+- `VerticalGridDimensionReferenceSource`
+- `GeometryReferenceCount`
+- `GeometryReferenceCategories`
+- `DimensionFallbackReason`
+- `TotalWidthDimensionId`
+- `HorizontalGridDimensionId`
+- `TotalHeightDimensionId`
+- `VerticalGridDimensionId`
+- `ReferenceCurveIds`
+- `DimensionStatus`
+- `DimensionWarnings[]`
+
+Dimension reference rule:
+
+- 優先使用帷幕本身 geometry references。
+- geometry references 來源包含 curtain panels、mullions、hosted doors/windows/inserts。
+- reference collection 必須使用 `Options.View = elevationView` 與 `ComputeReferences = true`。
+- 只有真實 geometry reference 不足或 Revit 拒絕建立 dimension 時，才使用 invisible detail curve fallback。
+- `DimensionReferenceSource` 類欄位必須標出 `geometry_reference`、`detail_curve_fallback`、`skipped` 或 `failed`。
+
+Dimension debug SOP:
+
+- 如果畫面上沒有尺寸，先執行 `diagnose_curtain_wall_elevation_dimensions`，不要直接改標註演算法。
+- 預設使用 `rollback = true`，測試產生的 dimension / reference plane 不得留在模型。
+- 先確認 `DimensionTypeId` 有值，再看 `AttemptedDimensions[]` 的 `Success`、`FailureMessage`、`ExistsAfterCreate`、`OwnerViewId`。
+- `reference_plane_fallback` 是保底對照組；如果它也失敗，代表問題在 dimension 建立流程或 view plane，不是 curtain geometry reference。
+- production `create_curtain_wall_elevations` 必須回傳 `DimensionAttemptCount`、`DimensionVerifiedCount`、`DimensionCreationErrors[]`；`addDimensions = true` 但 `DimensionVerifiedCount = 0` 時不得視為尺寸成功。
 
 ## Boundaries
 

@@ -324,6 +324,9 @@ namespace RevitMCP.Core
                     case "diagnose_curtain_wall_elevation_directions":
                         result = DiagnoseCurtainWallElevationDirections(parameters);
                         break;
+                    case "diagnose_curtain_wall_elevation_dimensions":
+                        result = DiagnoseCurtainWallElevationDimensions(parameters);
+                        break;
                     case "create_facade_panel":
                         result = CreateFacadePanel(parameters);
                         break;
