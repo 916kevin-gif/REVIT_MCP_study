@@ -692,7 +692,7 @@ Flipped = false -> opposite_orientation
 - `Created[].DirectionDot` 應接近 `1.0`，至少 `>= 0.98`。
 - View Template 名稱為 `帷幕立面`。
 - template 只顯示 walls、curtain wall panels、curtain wall mullions、doors、windows、levels、wall tags。
-- crop box 貼合帷幕 bounding box。
+- 直線帷幕的 crop box 左右界貼合 `Wall.LocationCurve` 端點；上下界仍貼合可視幾何。
 - far clip mode 是「剪裁含線」。
 - crop box / far clip depth 不被 template 鎖住。
 - `Skipped[]` 有具體 reason，沒有 silent failure。
@@ -703,10 +703,12 @@ Flipped = false -> opposite_orientation
 
 - 上方內層：垂直帷幕網格投影形成的水平尺寸鏈。
 - 上方外層：總寬。
-- 右側內層：水平帷幕網格投影形成的垂直尺寸鏈。
-- 右側外層：總高。
+- 左側內層：水平帷幕網格投影形成的垂直尺寸鏈。
+- 左側外層：總高。
 
-尺寸線以立面的 `RightDirection`、`UpDirection` 與已驗證的 `Crop2DMin`／`Crop2DMax` 為座標基準。帷幕可視邊界至內層網格尺寸線的模型間距，優先採用（DimensionType 的「輔助線長度」+ 圖紙 `3 mm`）乘以立面視圖比例；內層網格尺寸線至外層總尺寸線的模型間距，採用輔助線長度乘以立面視圖比例。只有無法讀取有效輔助線長度時，才分別使用 `dimensionOffsetMm`（預設模型距離 `300 mm`）與 `dimensionStackOffsetMm`（預設模型距離 `250 mm`）作為 fallback，並在回傳結果中說明來源與原因。即使某方向沒有足夠網格而略過網格尺寸，總尺寸仍保留在固定外層位置。
+直線帷幕的水平尺寸鏈以 `Wall.LocationCurve` 兩個端點投影至立面 `RightDirection` 後的原始邊界為準，不使用 panel、mullion 或 insert bounding box，也不包含 `horizontalMarginMm`。crop 左右界才會在原始邊界外加 `horizontalMarginMm`；預設為 `0` 時，crop 與帷幕左右端點一致。原生 geometry reference 必須位於端點 `1 mm` 內；找不到時使用端點座標建立 Invisible detail curve reference，不退回最近的豎框外緣。非直線 LocationCurve 保留既有可視幾何範圍並回傳 fallback 原因。
+
+尺寸線的垂直座標仍以立面的 `UpDirection` 與已驗證的 `Crop2DMin`／`Crop2DMax` 為基準。帷幕可視邊界至內層網格尺寸線的模型間距，優先採用（DimensionType 的「輔助線長度」+ 圖紙 `3 mm`）乘以立面視圖比例；內層網格尺寸線至外層總尺寸線的模型間距，採用輔助線長度乘以立面視圖比例。只有無法讀取有效輔助線長度時，才分別使用 `dimensionOffsetMm`（預設模型距離 `300 mm`）與 `dimensionStackOffsetMm`（預設模型距離 `250 mm`）作為 fallback，並在回傳結果中說明來源與原因。即使某方向沒有足夠網格而略過網格尺寸，總尺寸仍保留在固定外層位置。
 
 DimensionType 解析順序：
 

@@ -76,6 +76,7 @@ namespace RevitMCP.Core
             int referencePlaneCreatedCount = 0;
             int referencePlaneReferenceCount = 0;
             List<CurtainElevationGeometryReference> geometryReferences = new List<CurtainElevationGeometryReference>();
+            List<CurtainElevationGeometryReference> horizontalBoundaryReferences = new List<CurtainElevationGeometryReference>();
             List<CurtainElevationGeometryReference> gridLineReferences = new List<CurtainElevationGeometryReference>();
             CurtainElevationCropResult cropResult = null;
 
@@ -101,32 +102,33 @@ namespace RevitMCP.Core
                         XYZ sourceOriginDelta = sourceFrame.Origin - frame.Origin;
                         double xShift = sourceOriginDelta.DotProduct(frame.BasisX);
                         double yShift = sourceOriginDelta.DotProduct(frame.BasisY);
-                        double minX = cropResult.View2DMin.X + xShift;
-                        double maxX = cropResult.View2DMax.X + xShift;
+                        double minX = (cropResult.WallBoundaryMinXFt ?? cropResult.View2DMin.X) + xShift;
+                        double maxX = (cropResult.WallBoundaryMaxXFt ?? cropResult.View2DMax.X) + xShift;
                         double minY = cropResult.View2DMin.Y + yShift;
                         double maxY = cropResult.View2DMax.Y + yShift;
                         double topGridY = maxY + stackOffsetResolution.InnerOffsetFt;
                         double topTotalY = topGridY + stackOffsetResolution.ResolvedOffsetFt;
-                        double rightGridX = maxX + stackOffsetResolution.InnerOffsetFt;
-                        double rightTotalX = rightGridX + stackOffsetResolution.ResolvedOffsetFt;
+                        double leftGridX = minX - stackOffsetResolution.InnerOffsetFt;
+                        double leftTotalX = leftGridX - stackOffsetResolution.ResolvedOffsetFt;
 
                         geometryReferences = CollectCurtainElevationGeometryReferences(doc, wall, view, frame, minX, maxX, minY, maxY);
+                        horizontalBoundaryReferences = CollectCurtainElevationGeometryReferences(doc, wall, view, frame, minX, maxX, minY, maxY, true);
                         gridLineReferences = CollectCurtainElevationGridLineReferences(doc, wall, view, frame, minX, maxX, minY, maxY);
                         if (testMode == "geometry_reference" || testMode == "both")
                         {
-                            List<CurtainElevationGeometryReference> totalWidthRefs = SelectCurtainElevationBoundaryReferences(geometryReferences, "horizontal", minX, maxX, minY, maxY);
+                            List<CurtainElevationGeometryReference> totalWidthRefs = SelectCurtainElevationBoundaryReferences(horizontalBoundaryReferences, "horizontal", minX, maxX, minY, maxY, 1.0 / 304.8);
                             attempts.Add(TryDiagnoseCurtainGeometryDimension(doc, view, frame, dimensionType, "total_width", "horizontal", new List<double> { minX, maxX }, totalWidthRefs, topTotalY));
 
                             List<CurtainElevationGeometryReference> totalHeightRefs = SelectCurtainElevationBoundaryReferences(geometryReferences, "vertical", minX, maxX, minY, maxY);
-                            attempts.Add(TryDiagnoseCurtainGeometryDimension(doc, view, frame, dimensionType, "total_height", "vertical", new List<double> { minY, maxY }, totalHeightRefs, rightTotalX));
+                            attempts.Add(TryDiagnoseCurtainGeometryDimension(doc, view, frame, dimensionType, "total_height", "vertical", new List<double> { minY, maxY }, totalHeightRefs, leftTotalX));
 
                             List<double> verticalGridXs = GetCurtainElevationGridCoordinates(doc, wall, frame, "vertical", minX, maxX, minY, maxY);
-                            List<CurtainElevationGeometryReference> verticalGridRefs = SelectCurtainElevationGridDimensionReferences(geometryReferences, gridLineReferences, "horizontal", verticalGridXs);
+                            List<CurtainElevationGeometryReference> verticalGridRefs = SelectCurtainElevationGridDimensionReferences(horizontalBoundaryReferences, gridLineReferences, "horizontal", verticalGridXs);
                             attempts.Add(TryDiagnoseCurtainGeometryDimension(doc, view, frame, dimensionType, "horizontal_grid", "horizontal", verticalGridXs, verticalGridRefs, topGridY));
 
                             List<double> horizontalGridYs = GetCurtainElevationGridCoordinates(doc, wall, frame, "horizontal", minX, maxX, minY, maxY);
                             List<CurtainElevationGeometryReference> horizontalGridRefs = SelectCurtainElevationGridDimensionReferences(geometryReferences, gridLineReferences, "vertical", horizontalGridYs);
-                            attempts.Add(TryDiagnoseCurtainGeometryDimension(doc, view, frame, dimensionType, "vertical_grid", "vertical", horizontalGridYs, horizontalGridRefs, rightGridX));
+                            attempts.Add(TryDiagnoseCurtainGeometryDimension(doc, view, frame, dimensionType, "vertical_grid", "vertical", horizontalGridYs, horizontalGridRefs, leftGridX));
                         }
 
                         if (testMode == "reference_plane_fallback" || testMode == "both")
@@ -134,7 +136,7 @@ namespace RevitMCP.Core
                             attempts.Add(TryDiagnoseCurtainReferencePlaneDimension(doc, view, frame, dimensionType, "total_width", "horizontal", new List<double> { minX, maxX }, minY, maxY, topTotalY, referencePlaneIds, out int widthRefs));
                             referencePlaneReferenceCount += widthRefs;
 
-                            attempts.Add(TryDiagnoseCurtainReferencePlaneDimension(doc, view, frame, dimensionType, "total_height", "vertical", new List<double> { minY, maxY }, minX, maxX, rightTotalX, referencePlaneIds, out int heightRefs));
+                            attempts.Add(TryDiagnoseCurtainReferencePlaneDimension(doc, view, frame, dimensionType, "total_height", "vertical", new List<double> { minY, maxY }, minX, maxX, leftTotalX, referencePlaneIds, out int heightRefs));
                             referencePlaneReferenceCount += heightRefs;
                         }
                     }
@@ -190,6 +192,14 @@ namespace RevitMCP.Core
                 DimensionStackOffsetModelMm = Math.Round(stackOffsetResolution.ResolvedOffsetFt * 304.8, 3),
                 DimensionStackOffsetSource = stackOffsetResolution.Source,
                 DimensionStackOffsetFallbackReason = stackOffsetResolution.FallbackReason,
+                CurtainHorizontalBoundarySource = cropResult?.HorizontalBoundarySource,
+                CurtainHorizontalBoundaryFallbackReason = cropResult?.HorizontalBoundaryFallbackReason,
+                CurtainBoundaryMinXmm = cropResult?.WallBoundaryMinXFt.HasValue == true
+                    ? Math.Round(cropResult.WallBoundaryMinXFt.Value * 304.8, 2)
+                    : (double?)null,
+                CurtainBoundaryMaxXmm = cropResult?.WallBoundaryMaxXFt.HasValue == true
+                    ? Math.Round(cropResult.WallBoundaryMaxXFt.Value * 304.8, 2)
+                    : (double?)null,
                 DimensionWarnings = dimensionWarnings,
                 GeometryReferenceCount = geometryReferences.Count,
                 GeometryReferenceSamples = geometryReferences
@@ -457,8 +467,8 @@ namespace RevitMCP.Core
             XYZ sourceOriginDelta = sourceFrame.Origin - frame.Origin;
             double xShift = sourceOriginDelta.DotProduct(frame.BasisX);
             double yShift = sourceOriginDelta.DotProduct(frame.BasisY);
-            double minX = cropResult.View2DMin.X + xShift;
-            double maxX = cropResult.View2DMax.X + xShift;
+            double minX = (cropResult.WallBoundaryMinXFt ?? cropResult.View2DMin.X) + xShift;
+            double maxX = (cropResult.WallBoundaryMaxXFt ?? cropResult.View2DMax.X) + xShift;
             double minY = cropResult.View2DMin.Y + yShift;
             double maxY = cropResult.View2DMax.Y + yShift;
             if (maxX - minX <= 1e-6 || maxY - minY <= 1e-6)
@@ -471,11 +481,12 @@ namespace RevitMCP.Core
 
             double topGridY = maxY + stackOffsetResolution.InnerOffsetFt;
             double topTotalY = topGridY + stackOffsetResolution.ResolvedOffsetFt;
-            double rightGridX = maxX + stackOffsetResolution.InnerOffsetFt;
-            double rightTotalX = rightGridX + stackOffsetResolution.ResolvedOffsetFt;
+            double leftGridX = minX - stackOffsetResolution.InnerOffsetFt;
+            double leftTotalX = leftGridX - stackOffsetResolution.ResolvedOffsetFt;
             List<CurtainElevationGeometryReference> geometryReferences = CollectCurtainElevationGeometryReferences(doc, wall, view, frame, minX, maxX, minY, maxY);
+            List<CurtainElevationGeometryReference> horizontalBoundaryReferences = CollectCurtainElevationGeometryReferences(doc, wall, view, frame, minX, maxX, minY, maxY, true);
             List<CurtainElevationGeometryReference> gridLineReferences = CollectCurtainElevationGridLineReferences(doc, wall, view, frame, minX, maxX, minY, maxY);
-            result.GeometryReferenceCount = geometryReferences.Count + gridLineReferences.Count;
+            result.GeometryReferenceCount = horizontalBoundaryReferences.Count + gridLineReferences.Count;
             result.CurtainGridLineCount = wall.CurtainGrid.GetUGridLineIds().Count + wall.CurtainGrid.GetVGridLineIds().Count;
             result.CurtainGridLineReferenceCount = gridLineReferences.Count;
             if (result.CurtainGridLineReferenceCount < result.CurtainGridLineCount)
@@ -492,18 +503,20 @@ namespace RevitMCP.Core
                 SelectedForDimension = r.SelectedForDimension,
                 SelectionReason = r.SelectionReason
             }));
-            result.GeometryReferenceCategories = geometryReferences
+            result.GeometryReferenceCategories = horizontalBoundaryReferences
                 .Select(r => r.CategoryName)
                 .Where(s => !string.IsNullOrWhiteSpace(s))
                 .Distinct()
                 .OrderBy(s => s)
                 .ToList();
 
-            List<CurtainElevationGeometryReference> totalWidthRefs = SelectCurtainElevationBoundaryReferences(geometryReferences, "horizontal", minX, maxX, minY, maxY);
-            if (TryCreateCurtainElevationDimensionChain(doc, view, frame, dimensionType, "horizontal", new List<double> { minX, maxX }, totalWidthRefs, minY, maxY, topTotalY, result, false, out ElementId totalWidthId, out string totalWidthSource, out string totalWidthReason))
+            List<CurtainElevationGeometryReference> totalWidthRefs = SelectCurtainElevationBoundaryReferences(horizontalBoundaryReferences, "horizontal", minX, maxX, minY, maxY, 1.0 / 304.8);
+            if (TryCreateCurtainElevationDimensionChain(doc, view, frame, dimensionType, "horizontal", new List<double> { minX, maxX }, totalWidthRefs, minY, maxY, topTotalY, result, true, out ElementId totalWidthId, out string totalWidthSource, out string totalWidthReason))
             {
                 result.TotalWidthDimensionId = totalWidthId;
-                result.TotalWidthDimensionReferenceSource = totalWidthSource;
+                result.TotalWidthDimensionReferenceSource = totalWidthRefs.Any(reference => reference.ElementId == wall.Id)
+                    ? "host_wall_geometry_reference"
+                    : totalWidthSource;
                 result.CreatedCount++;
             }
             else
@@ -514,7 +527,7 @@ namespace RevitMCP.Core
             }
 
             List<CurtainElevationGeometryReference> totalHeightRefs = SelectCurtainElevationBoundaryReferences(geometryReferences, "vertical", minX, maxX, minY, maxY);
-            if (TryCreateCurtainElevationDimensionChain(doc, view, frame, dimensionType, "vertical", new List<double> { minY, maxY }, totalHeightRefs, minX, maxX, rightTotalX, result, false, out ElementId totalHeightId, out string totalHeightSource, out string totalHeightReason))
+            if (TryCreateCurtainElevationDimensionChain(doc, view, frame, dimensionType, "vertical", new List<double> { minY, maxY }, totalHeightRefs, minX, maxX, leftTotalX, result, false, out ElementId totalHeightId, out string totalHeightSource, out string totalHeightReason))
             {
                 result.TotalHeightDimensionId = totalHeightId;
                 result.TotalHeightDimensionReferenceSource = totalHeightSource;
@@ -530,7 +543,7 @@ namespace RevitMCP.Core
             List<double> verticalGridXs = GetCurtainElevationGridCoordinates(doc, wall, frame, "vertical", minX, maxX, minY, maxY);
             if (verticalGridXs.Count >= 3)
             {
-                List<CurtainElevationGeometryReference> verticalGridRefs = SelectCurtainElevationGridDimensionReferences(geometryReferences, gridLineReferences, "horizontal", verticalGridXs);
+                List<CurtainElevationGeometryReference> verticalGridRefs = SelectCurtainElevationGridDimensionReferences(horizontalBoundaryReferences, gridLineReferences, "horizontal", verticalGridXs);
                 if (TryCreateCurtainElevationDimensionChain(doc, view, frame, dimensionType, "horizontal", verticalGridXs, verticalGridRefs, minY, maxY, topGridY, result, true, out ElementId horizontalGridId, out string horizontalGridSource, out string horizontalGridReason))
                 {
                     result.HorizontalGridDimensionId = horizontalGridId;
@@ -554,7 +567,7 @@ namespace RevitMCP.Core
             if (horizontalGridYs.Count >= 3)
             {
                 List<CurtainElevationGeometryReference> horizontalGridRefs = SelectCurtainElevationGridDimensionReferences(geometryReferences, gridLineReferences, "vertical", horizontalGridYs);
-                if (TryCreateCurtainElevationDimensionChain(doc, view, frame, dimensionType, "vertical", horizontalGridYs, horizontalGridRefs, minX, maxX, rightGridX, result, true, out ElementId verticalGridId, out string verticalGridSource, out string verticalGridReason))
+                if (TryCreateCurtainElevationDimensionChain(doc, view, frame, dimensionType, "vertical", horizontalGridYs, horizontalGridRefs, minX, maxX, leftGridX, result, true, out ElementId verticalGridId, out string verticalGridSource, out string verticalGridReason))
                 {
                     result.VerticalGridDimensionId = verticalGridId;
                     result.VerticalGridDimensionReferenceSource = verticalGridSource;
@@ -973,9 +986,11 @@ namespace RevitMCP.Core
                     return false;
                 }
 
+                bool isWallBoundaryPair = axis == "horizontal" && distinct.Count == 2;
+                string fallbackTarget = isWallBoundaryPair ? "wall boundary" : "curtain grid";
                 aggregate.DimensionFallbackReason = AppendCurtainElevationWarning(
                     aggregate.DimensionFallbackReason,
-                    $"{axis} grid dimension used invisible detail curve fallback from curtain grid coordinates: {geometryReason}");
+                    $"{axis} dimension used invisible detail curve fallback from {fallbackTarget} coordinates: {geometryReason}");
 
                 if (TryCreateCurtainElevationDetailCurveFallbackDimension(
                     doc,
@@ -991,7 +1006,9 @@ namespace RevitMCP.Core
                     out dimensionId,
                     out string fallbackReason))
                 {
-                    referenceSource = "detail_curve_fallback_from_curtain_grid_coordinates";
+                    referenceSource = isWallBoundaryPair
+                        ? "detail_curve_fallback_from_wall_boundary_coordinates"
+                        : "detail_curve_fallback_from_curtain_grid_coordinates";
                     return true;
                 }
 
@@ -1194,7 +1211,7 @@ namespace RevitMCP.Core
 
                 if (!invisibleLineStyleApplied)
                 {
-                    aggregate.Warnings.Add("Grid dimension detail-curve fallback succeeded, but Revit did not expose/apply BuiltInCategory.OST_InvisibleLines to the helper curves.");
+                    aggregate.Warnings.Add("Dimension detail-curve fallback succeeded, but Revit did not expose/apply BuiltInCategory.OST_InvisibleLines to the helper curves.");
                     aggregate.DimensionFallbackReason = AppendCurtainElevationWarning(
                         aggregate.DimensionFallbackReason,
                         "detail curve fallback dimension succeeded, invisible line style was not applied.");
@@ -1383,7 +1400,8 @@ namespace RevitMCP.Core
             double minX,
             double maxX,
             double minY,
-            double maxY)
+            double maxY,
+            bool includeHostWall = false)
         {
             var references = new List<CurtainElevationGeometryReference>();
             if (doc == null || wall == null || view == null || frame == null)
@@ -1396,7 +1414,7 @@ namespace RevitMCP.Core
             };
             options.View = view;
 
-            foreach (ElementId id in GetCurtainElevationElementIds(wall, includeHostWall: false))
+            foreach (ElementId id in GetCurtainElevationElementIds(wall, includeHostWall))
             {
                 Element element = doc.GetElement(id);
                 if (element == null)
@@ -1479,7 +1497,70 @@ namespace RevitMCP.Core
                             // Ignore malformed edge references.
                         }
                     }
+
+                    foreach (Face face in solid.Faces)
+                    {
+                        if (face is PlanarFace planarFace)
+                        {
+                            AddCurtainElevationPlanarFaceReference(
+                                planarFace, references, viewFrame, geometryTransform, sourceElement);
+                        }
+                    }
                 }
+            }
+        }
+
+        private void AddCurtainElevationPlanarFaceReference(
+            PlanarFace face,
+            List<CurtainElevationGeometryReference> references,
+            Transform viewFrame,
+            Transform geometryTransform,
+            Element sourceElement)
+        {
+            if (face?.Reference == null || references == null || viewFrame == null || sourceElement == null)
+                return;
+
+            try
+            {
+                XYZ worldNormal = geometryTransform.OfVector(face.FaceNormal);
+                XYZ localNormal = viewFrame.Inverse.OfVector(worldNormal).Normalize();
+                if (Math.Abs(localNormal.X) < 0.999)
+                    return;
+
+                Mesh mesh = face.Triangulate();
+                if (mesh == null || mesh.Vertices == null || mesh.Vertices.Count == 0)
+                    return;
+
+                List<XYZ> localVertices = mesh.Vertices
+                    .Select(vertex => viewFrame.Inverse.OfPoint(geometryTransform.OfPoint(vertex)))
+                    .ToList();
+                double centerX = localVertices.Average(point => point.X);
+                double minY = localVertices.Min(point => point.Y);
+                double maxY = localVertices.Max(point => point.Y);
+                double length = maxY - minY;
+                if (length <= 1e-6)
+                    return;
+
+                references.Add(new CurtainElevationGeometryReference
+                {
+                    Reference = face.Reference,
+                    ElementId = sourceElement.Id,
+                    CategoryName = sourceElement.Category?.Name,
+                    Start = viewFrame.OfPoint(new XYZ(centerX, minY, 0)),
+                    End = viewFrame.OfPoint(new XYZ(centerX, maxY, 0)),
+                    MinX = centerX,
+                    MaxX = centerX,
+                    MinY = minY,
+                    MaxY = maxY,
+                    Length = length,
+                    IsVertical = true,
+                    IsHorizontal = false,
+                    GeometryObjectType = "planar_face"
+                });
+            }
+            catch
+            {
+                // Host curtain walls do not always expose stable end-face references.
             }
         }
 
@@ -1536,9 +1617,10 @@ namespace RevitMCP.Core
             double minX,
             double maxX,
             double minY,
-            double maxY)
+            double maxY,
+            double toleranceFt = -1)
         {
-            double tolerance = 25.0 / 304.8;
+            double tolerance = toleranceFt > 0 ? toleranceFt : 25.0 / 304.8;
             if (dimensionAxis == "horizontal")
             {
                 List<CurtainElevationGeometryReference> verticals = references.Where(r => r.IsVertical).ToList();
@@ -1581,6 +1663,7 @@ namespace RevitMCP.Core
                 return result;
 
             double tolerance = 10.0 / 304.8;
+            double boundaryTolerance = 1.0 / 304.8;
             double minCoordinate = distinct.First();
             double maxCoordinate = distinct.Last();
 
@@ -1601,8 +1684,9 @@ namespace RevitMCP.Core
                         : gridLineReferences.Where(r => r.IsHorizontal).ToList();
                 }
 
+                double matchTolerance = isBoundary && dimensionAxis == "horizontal" ? boundaryTolerance : tolerance;
                 CurtainElevationGeometryReference match = candidates
-                    .Where(r => Math.Abs((dimensionAxis == "horizontal" ? r.CenterX : r.CenterY) - coordinate) <= tolerance)
+                    .Where(r => Math.Abs((dimensionAxis == "horizontal" ? r.CenterX : r.CenterY) - coordinate) <= matchTolerance)
                     .OrderBy(r => Math.Abs((dimensionAxis == "horizontal" ? r.CenterX : r.CenterY) - coordinate))
                     .ThenByDescending(r => r.Length)
                     .FirstOrDefault();

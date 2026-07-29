@@ -61,7 +61,7 @@ export const curtainWallTools: Tool[] = [
                 placementViewName: { type: "string", description: "放置 ElevationMarker 的 ViewPlan 名稱。" },
                 scale: { type: "number", description: "立面視圖比例，預設 50。", default: 50 },
                 offsetMm: { type: "number", description: "marker 放在牆外側的距離，單位 mm，預設 1500。", default: 1500 },
-                horizontalMarginMm: { type: "number", description: "crop 左右餘裕，單位 mm，預設 0；剪裁範圍依 elevation view 內目標帷幕元素的 2D 可視範圍計算。", default: 0 },
+                horizontalMarginMm: { type: "number", description: "crop 左右餘裕，單位 mm，預設 0；直線帷幕以 Wall.LocationCurve 端點為左右界，餘裕只擴張 crop，不影響尺寸端點。", default: 0 },
                 verticalMarginMm: { type: "number", description: "crop 上下餘裕，單位 mm，預設 0；剪裁範圍依 elevation view 內目標帷幕元素的 2D 可視範圍計算。", default: 0 },
                 depthMm: { type: "number", description: "自動深度計算失敗時的 fallback 遠剪裁深度，單位 mm，預設 1200；正常情況會剛好包住帷幕牆所有相關元素，遠端剪裁模式固定為剪裁含線。", default: 1200 },
                 viewTemplateName: { type: "string", description: "視圖樣板名稱，預設「帷幕立面」。", default: "帷幕立面" },

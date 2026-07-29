@@ -505,6 +505,17 @@ namespace RevitMCP.Core
                             Crop2DUpDirection = ToCurtainElevationXyz(cropResult.View2DUpDirection),
                             Crop2DMin = ToCurtainElevationXyz(cropResult.View2DMin),
                             Crop2DMax = ToCurtainElevationXyz(cropResult.View2DMax),
+                            CurtainHorizontalBoundarySource = cropResult.HorizontalBoundarySource,
+                            CurtainHorizontalBoundaryFallbackReason = cropResult.HorizontalBoundaryFallbackReason,
+                            CurtainBoundaryStart = ToCurtainElevationPointMm(cropResult.WallBoundaryStart),
+                            CurtainBoundaryEnd = ToCurtainElevationPointMm(cropResult.WallBoundaryEnd),
+                            CurtainBoundaryMinXmm = cropResult.WallBoundaryMinXFt.HasValue
+                                ? Math.Round(cropResult.WallBoundaryMinXFt.Value * 304.8, 2)
+                                : (double?)null,
+                            CurtainBoundaryMaxXmm = cropResult.WallBoundaryMaxXFt.HasValue
+                                ? Math.Round(cropResult.WallBoundaryMaxXFt.Value * 304.8, 2)
+                                : (double?)null,
+                            CropHorizontalMarginMm = Math.Round(cropResult.HorizontalMarginFt * 304.8, 2),
                             Crop2DPointCount = cropResult.View2DPointCount,
                             Crop2DSource = cropResult.View2DSource,
                             Crop2DExtremeContributors = cropResult.View2DExtremeContributors,
@@ -1345,6 +1356,13 @@ namespace RevitMCP.Core
             public XYZ View2DUpDirection { get; set; }
             public XYZ View2DMin { get; set; }
             public XYZ View2DMax { get; set; }
+            public string HorizontalBoundarySource { get; set; } = "view_2d_visible_bounds";
+            public string HorizontalBoundaryFallbackReason { get; set; }
+            public XYZ WallBoundaryStart { get; set; }
+            public XYZ WallBoundaryEnd { get; set; }
+            public double? WallBoundaryMinXFt { get; set; }
+            public double? WallBoundaryMaxXFt { get; set; }
+            public double HorizontalMarginFt { get; set; }
             public int View2DPointCount { get; set; }
             public string View2DSource { get; set; }
             public object View2DExtremeContributors { get; set; }
@@ -1694,9 +1712,42 @@ namespace RevitMCP.Core
             if (view2DExtents == null)
                 return result;
 
+            result.HorizontalMarginFt = horizontalMarginFt;
+            CurtainElevationLocalExtents cropView2DExtents = view2DExtents;
+            if (TryGetCurtainElevationStraightWallHorizontalBoundary(
+                wall,
+                view2DFrame,
+                out double wallBoundaryMinX,
+                out double wallBoundaryMaxX,
+                out XYZ wallBoundaryStart,
+                out XYZ wallBoundaryEnd,
+                out string boundaryFallbackReason))
+            {
+                result.HorizontalBoundarySource = "wall_location_curve_endpoints";
+                result.WallBoundaryStart = wallBoundaryStart;
+                result.WallBoundaryEnd = wallBoundaryEnd;
+                result.WallBoundaryMinXFt = wallBoundaryMinX;
+                result.WallBoundaryMaxXFt = wallBoundaryMaxX;
+                cropView2DExtents = new CurtainElevationLocalExtents
+                {
+                    Min = new XYZ(wallBoundaryMinX, view2DExtents.Min.Y, view2DExtents.Min.Z),
+                    Max = new XYZ(wallBoundaryMaxX, view2DExtents.Max.Y, view2DExtents.Max.Z),
+                    MinXRecord = view2DExtents.MinXRecord,
+                    MaxXRecord = view2DExtents.MaxXRecord,
+                    MinYRecord = view2DExtents.MinYRecord,
+                    MaxYRecord = view2DExtents.MaxYRecord,
+                    MinZRecord = view2DExtents.MinZRecord,
+                    MaxZRecord = view2DExtents.MaxZRecord
+                };
+            }
+            else
+            {
+                result.HorizontalBoundaryFallbackReason = boundaryFallbackReason;
+            }
+
             CurtainElevationLocalExtents cropFrameExtents = ConvertCurtainElevationView2DExtentsToCropFrameExtents(
                 view2DFrame,
-                view2DExtents,
+                cropView2DExtents,
                 cropFrame,
                 horizontalMarginFt,
                 verticalMarginFt);
@@ -1729,8 +1780,8 @@ namespace RevitMCP.Core
             result.LocalMin = cropFrameExtents.Min;
             result.LocalMax = cropFrameExtents.Max;
             result.ExtremeContributors = ToCurtainElevationExtremeContributors(view2DExtents);
-            result.View2DMin = new XYZ(view2DExtents.Min.X - horizontalMarginFt, view2DExtents.Min.Y - verticalMarginFt, view2DExtents.Min.Z);
-            result.View2DMax = new XYZ(view2DExtents.Max.X + horizontalMarginFt, view2DExtents.Max.Y + verticalMarginFt, view2DExtents.Max.Z);
+            result.View2DMin = new XYZ(cropView2DExtents.Min.X - horizontalMarginFt, cropView2DExtents.Min.Y - verticalMarginFt, cropView2DExtents.Min.Z);
+            result.View2DMax = new XYZ(cropView2DExtents.Max.X + horizontalMarginFt, cropView2DExtents.Max.Y + verticalMarginFt, cropView2DExtents.Max.Z);
             result.View2DExtremeContributors = ToCurtainElevationExtremeContributors(view2DExtents);
 
             view.CropBoxActive = true;
@@ -1743,6 +1794,62 @@ namespace RevitMCP.Core
             };
 
             return result;
+        }
+
+        private bool TryGetCurtainElevationStraightWallHorizontalBoundary(
+            Wall wall,
+            Transform view2DFrame,
+            out double minX,
+            out double maxX,
+            out XYZ start,
+            out XYZ end,
+            out string fallbackReason)
+        {
+            minX = 0;
+            maxX = 0;
+            start = null;
+            end = null;
+            fallbackReason = null;
+
+            if (wall == null || view2DFrame == null)
+            {
+                fallbackReason = "wall or view 2D frame is unavailable.";
+                return false;
+            }
+
+            LocationCurve location = wall.Location as LocationCurve;
+            Line wallLine = location?.Curve as Line;
+            if (wallLine == null)
+            {
+                fallbackReason = "wall LocationCurve is not a straight line; retained visible-geometry horizontal bounds.";
+                return false;
+            }
+
+            try
+            {
+                start = wallLine.GetEndPoint(0);
+                end = wallLine.GetEndPoint(1);
+                XYZ localStart = view2DFrame.Inverse.OfPoint(start);
+                XYZ localEnd = view2DFrame.Inverse.OfPoint(end);
+                minX = Math.Min(localStart.X, localEnd.X);
+                maxX = Math.Max(localStart.X, localEnd.X);
+                if (maxX - minX <= 1e-6)
+                {
+                    fallbackReason = "projected wall LocationCurve endpoints do not define a usable horizontal span.";
+                    start = null;
+                    end = null;
+                    return false;
+                }
+
+                return true;
+            }
+            catch (Exception ex)
+            {
+                fallbackReason = "failed to project wall LocationCurve endpoints: " + ex.Message;
+                start = null;
+                end = null;
+                return false;
+            }
         }
 
         private Transform GetCurtainElevationView2DFrame(ViewSection view, Transform fallbackCropFrame)
