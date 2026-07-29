@@ -22,6 +22,8 @@ $ErrorActionPreference = "Continue"
 $scriptDir = $PSScriptRoot
 $projectRoot = Split-Path -Parent -Path $scriptDir
 
+. (Join-Path $PSScriptRoot "addin-deployment-path.ps1")
+
 $totalPass = 0
 $totalFail = 0
 $totalSkip = 0
@@ -60,7 +62,8 @@ function Read-FileText {
     param([string]$Path)
     try {
         if (-not $Path -or -not (Test-Path -LiteralPath $Path -PathType Leaf)) { return $null }
-        return [System.IO.File]::ReadAllText($Path)
+        $utf8Strict = New-Object System.Text.UTF8Encoding($false, $true)
+        return [System.IO.File]::ReadAllText($Path, $utf8Strict)
     } catch {
         return $null
     }
@@ -382,7 +385,12 @@ if ($SkipDeploy) {
 }
 else {
     $appDataPath = $env:APPDATA
-    $supportedVersions = @("2022", "2023", "2024", "2025", "2026")
+    $supportedVersions = if ($Version) {
+        @($Version)
+    }
+    else {
+        @("2022", "2023", "2024", "2025", "2026")
+    }
 
     Write-Host ""
     Write-Host "  5-1. Installed addin locations:" -ForegroundColor Cyan
@@ -421,17 +429,35 @@ else {
             $duplicateFound = $true
         }
         elseif ($addinFiles.Count -eq 1) {
-            # Verify DLL exists — 從 .addin 讀 Assembly 路徑，支援根目錄或子資料夾部署
-            $addinContent = Read-FileText $addinFiles[0].FullName
-            $dllDir = $addinFiles[0].DirectoryName
-            $assemblyPath = if ($addinContent -match "<Assembly>([^<]+)</Assembly>") { $matches[1] } else { "RevitMCP.dll" }
-            $dllPath = Join-Path $dllDir $assemblyPath
-            if (Test-Path $dllPath) {
-                $dll = Get-Item $dllPath
-                Write-Check "Revit $ver DLL present ($($dll.Length) bytes)" $true
+            try {
+                $assemblyTarget = Resolve-RevitAddinAssemblyTarget `
+                    -ManifestPath $addinFiles[0].FullName `
+                    -TargetBase $addinFiles[0].DirectoryName
+                $dllPath = $assemblyTarget.FullPath
+                if (Test-Path -LiteralPath $dllPath) {
+                    $dll = Get-Item -LiteralPath $dllPath
+                    Write-Check "Revit $ver DLL present ($($dll.Length) bytes)" $true
+
+                    $buildConfig = "Release.R$($ver.Substring(2))"
+                    $buildDll = Join-Path $projectRoot "MCP\bin\$buildConfig\RevitMCP.dll"
+                    if (Test-Path -LiteralPath $buildDll) {
+                        $buildHash = (Get-FileHash -LiteralPath $buildDll -Algorithm SHA256).Hash
+                        $deployedHash = (Get-FileHash -LiteralPath $dllPath -Algorithm SHA256).Hash
+                        Write-Check `
+                            "Revit $ver deployed DLL matches build SHA-256" `
+                            ($buildHash -eq $deployedHash) `
+                            "Build: $buildHash; deployed: $deployedHash; path: $dllPath"
+                    }
+                    else {
+                        Write-Skip "Revit $ver deployed DLL hash" "Build DLL not found: $buildDll"
+                    }
+                }
+                else {
+                    Write-Check "Revit $ver DLL present" $false "DLL missing at $dllPath (from .addin Assembly: $($assemblyTarget.RelativePath))"
+                }
             }
-            else {
-                Write-Check "Revit $ver DLL present" $false "DLL missing at $dllPath (from .addin Assembly: $assemblyPath)"
+            catch {
+                Write-Check "Revit $ver Assembly path is safe" $false $_.Exception.Message
             }
         }
     }

@@ -17,6 +17,8 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
+. (Join-Path $PSScriptRoot "addin-deployment-path.ps1")
+
 # 設定編碼為 UTF-8 with BOM，解決中文亂碼問題
 $OutputEncoding = [System.Text.Encoding]::UTF8
 
@@ -286,6 +288,10 @@ if (-not (Test-Path $sourceAddin)) {
 
 Write-Host "✓ 找到 RevitMCP.addin" -ForegroundColor Green
 Write-Host ""
+$assemblyTarget = Resolve-RevitAddinAssemblyTarget -ManifestPath $sourceAddin -TargetBase $addonPath
+$targetDllPath = $assemblyTarget.FullPath
+$targetDllDir = $assemblyTarget.DirectoryPath
+
 
 # 顯示檔案雜湊值（供進階使用者驗證）
 Write-Host "檔案驗證資訊 (SHA256)：" -ForegroundColor Cyan
@@ -306,7 +312,8 @@ Write-Host "  - $sourceDll" -ForegroundColor White
 Write-Host "  - $sourceAddin" -ForegroundColor White
 Write-Host ""
 Write-Host "目標：" -ForegroundColor Cyan
-Write-Host "  - $addonPath" -ForegroundColor White
+Write-Host "  - DLL: $targetDllPath" -ForegroundColor White
+Write-Host "  - ADDIN: $(Join-Path $addonPath 'RevitMCP.addin')" -ForegroundColor White
 Write-Host ""
 
 $confirm = "Y" # Auto-confirm for automation
@@ -340,10 +347,18 @@ if (-not (Test-Path $addonPath)) {
     }
 }
 
+if (-not (Test-Path $targetDllDir)) {
+    New-Item -ItemType Directory -Path $targetDllDir -Force | Out-Null
+}
 # 複製 DLL
 try {
-    Copy-Item -Path $sourceDll -Destination (Join-Path $addonPath "RevitMCP.dll") -Force -ErrorAction Stop
-    Write-Host "✓ 已複製 RevitMCP.dll" -ForegroundColor Green
+    Copy-Item -Path $sourceDll -Destination $targetDllPath -Force -ErrorAction Stop
+    $sourceDllHash = (Get-FileHash -LiteralPath $sourceDll -Algorithm SHA256).Hash
+    $targetDllHash = (Get-FileHash -LiteralPath $targetDllPath -Algorithm SHA256).Hash
+    if ($sourceDllHash -ne $targetDllHash) {
+        throw "部署後 SHA-256 不一致。來源：$sourceDllHash；目標：$targetDllHash"
+    }
+    Write-Host "✓ 已複製並驗證 RevitMCP.dll：$targetDllPath" -ForegroundColor Green
 }
 catch {
     Write-Host "❌ 錯誤：無法複製 RevitMCP.dll" -ForegroundColor Red
@@ -372,7 +387,7 @@ catch {
 $sourceJson = Join-Path $projectRoot "MCP\bin\$buildConfig\Newtonsoft.Json.dll"
 if (Test-Path $sourceJson) {
     try {
-        Copy-Item -Path $sourceJson -Destination (Join-Path $addonPath "Newtonsoft.Json.dll") -Force -ErrorAction Stop
+        Copy-Item -Path $sourceJson -Destination (Join-Path $targetDllDir "Newtonsoft.Json.dll") -Force -ErrorAction Stop
         Write-Host "✓ 已複製 Newtonsoft.Json.dll" -ForegroundColor Green
     }
     catch {
@@ -382,6 +397,17 @@ if (Test-Path $sourceJson) {
 
 # 複製 Python worker（柱號對應功能 ezdxf_worker.py → %APPDATA%\RevitMCP）
 # DwgColumnExecutor.FindWorkerScript 會在 dll 同層 → 開發樹 → %APPDATA%\RevitMCP 依序尋找；
+
+$unusedRootDll = Join-Path $addonPath "RevitMCP.dll"
+if (
+    (Test-Path -LiteralPath $unusedRootDll) -and
+    -not [System.IO.Path]::GetFullPath($unusedRootDll).Equals(
+        [System.IO.Path]::GetFullPath($targetDllPath),
+        [System.StringComparison]::OrdinalIgnoreCase
+    )
+) {
+    Write-Host "⚠️  Addins 根目錄仍有未被 manifest 引用的 DLL（未刪除）：$unusedRootDll" -ForegroundColor Yellow
+}
 # 部署版的 dll 在 Add-ins 目錄，故 worker 須落在 %APPDATA%\RevitMCP 才找得到。
 $sourceWorker = Join-Path $projectRoot "bridge\python\skills\ezdxf_worker.py"
 if (Test-Path $sourceWorker) {

@@ -82,6 +82,8 @@ dir
 | `nameSeparator` | string | `""` | `{LevelName}` 與 `{Mark}` 中間的分隔字串。 |
 | `dryRun` | boolean | `false` | 只預覽結果，不建立 view。 |
 
+Far clip 以 `view.Origin` 沿立面實際視線方向投影目標帷幕元素，取最遠正深度並加 `50 mm`。只有無有效目標點或無法解析視線時才使用 `depthMm`；全部投影深度為負時改用最大絕對深度並回傳警告。寫入後會以 `1 mm` 容差讀回驗證。
+
 ### Output
 
 | 欄位 | 說明 |
@@ -109,7 +111,11 @@ dir
   "LevelName": "1F",
   "Mark": "CW-01",
   "MarkerId": 24680,
-  "FarClipDepthMm": 186.5,
+  "FarClipDepthMm": 1750.0,
+  "FarClipMethod": "view_origin_to_target_max_depth",
+  "FarClipRequestedDepthMm": 1750.0,
+  "FarClipActualOffsetMm": 1750.0,
+  "FarClipPass": true,
   "DirectionDot": 1.0,
   "DirectionFixApplied": false,
   "DesiredLookDirection": { "X": -1.0, "Y": 0.0, "Z": 0.0 },
@@ -690,6 +696,37 @@ Flipped = false -> opposite_orientation
 - far clip mode 是「剪裁含線」。
 - crop box / far clip depth 不被 template 鎖住。
 - `Skipped[]` 有具體 reason，沒有 silent failure。
+
+## 尺寸標示規則
+
+`create_curtain_wall_elevations` 預設以 `addDimensions = true` 建立四組 Revit `Dimension`：
+
+- 上方內層：垂直帷幕網格投影形成的水平尺寸鏈。
+- 上方外層：總寬。
+- 右側內層：水平帷幕網格投影形成的垂直尺寸鏈。
+- 右側外層：總高。
+
+尺寸線以立面的 `RightDirection`、`UpDirection` 與已驗證的 `Crop2DMin`／`Crop2DMax` 為座標基準。帷幕可視邊界至內層網格尺寸線的模型間距，優先採用（DimensionType 的「輔助線長度」+ 圖紙 `3 mm`）乘以立面視圖比例；內層網格尺寸線至外層總尺寸線的模型間距，採用輔助線長度乘以立面視圖比例。只有無法讀取有效輔助線長度時，才分別使用 `dimensionOffsetMm`（預設模型距離 `300 mm`）與 `dimensionStackOffsetMm`（預設模型距離 `250 mm`）作為 fallback，並在回傳結果中說明來源與原因。即使某方向沒有足夠網格而略過網格尺寸，總尺寸仍保留在固定外層位置。
+
+DimensionType 解析順序：
+
+1. `dimensionTypeId`
+2. `dimensionTypeName`
+3. 本次 RevitMCP process 最近成功使用的帷幕立面標註類型
+4. Revit 預設線性標註類型
+5. 第一個可用的 `DimensionType`
+
+`dimensionTypeSelectionMode = prompt` 且未提供類型時，工具回傳 `awaiting_dimension_type_selection`，不建立任何視圖。自動模式找不到類型時仍建立立面，並在 `DimensionWarnings` 回報。
+
+Reference 策略：
+
+- 總寬與總高只接受帷幕面板、豎框、門窗或其他插入物的真實 geometry reference。
+- 網格尺寸優先使用 `CurtainGridLine` 與帷幕元素的真實 reference。
+- 網格 reference 不足或 Revit 拒絕建立時，才建立套用 Invisible 線型的 detail curve 作為 fallback。
+- 回傳欄位會標示 `geometry_reference`、`detail_curve_fallback_from_curtain_grid_coordinates`、`skipped` 或 `failed`。
+
+除錯時使用 `diagnose_curtain_wall_elevation_dimensions`。預設 `rollback = true`，測試產生的尺寸、ReferencePlane 與 detail curve 都不會留在模型。應檢查 `AttemptedDimensions`、`VerifiedDimensionIds`、`OwnerViewId` 與 `Failures`，不要只依賴 API 未拋出例外就判定成功。
+
 
 ## Boundaries
 

@@ -237,6 +237,19 @@ namespace RevitMCP.Core
             bool applyViewTemplate = parameters["applyViewTemplate"]?.Value<bool>() ?? true;
             string nameSeparator = parameters["nameSeparator"]?.Value<string>() ?? "";
             bool dryRun = parameters["dryRun"]?.Value<bool>() ?? false;
+            bool addDimensions = parameters["addDimensions"]?.Value<bool>() ?? true;
+            string dimensionTypeSelectionMode = parameters["dimensionTypeSelectionMode"]?.Value<string>()?.Trim().ToLowerInvariant() ?? "auto";
+            double dimensionOffsetFt = (parameters["dimensionOffsetMm"]?.Value<double>() ?? 300.0) / 304.8;
+            double dimensionStackOffsetFallbackFt = (parameters["dimensionStackOffsetMm"]?.Value<double>() ?? 250.0) / 304.8;
+            var dimensionWarnings = new List<string>();
+            CurtainElevationDimensionTypeResolution dimensionTypeResolution = ResolveCurtainElevationDimensionType(doc, parameters, dimensionWarnings);
+            DimensionType dimensionType = addDimensions ? dimensionTypeResolution.DimensionType : null;
+            CurtainElevationDimensionStackOffsetResolution dryRunStackOffsetResolution =
+                ResolveCurtainElevationDimensionStackOffset(dimensionType, scale, dimensionOffsetFt, dimensionStackOffsetFallbackFt);
+            bool hasExplicitDimensionType = parameters["dimensionTypeId"] != null || !string.IsNullOrWhiteSpace(parameters["dimensionTypeName"]?.Value<string>());
+
+            if (addDimensions && dimensionTypeSelectionMode == "prompt" && !hasExplicitDimensionType)
+                return BuildCurtainElevationDimensionTypePrompt(dimensionTypeSelectionMode);
 
             ViewFamilyType elevationType = new FilteredElementCollector(doc)
                 .OfClass(typeof(ViewFamilyType))
@@ -301,6 +314,22 @@ namespace RevitMCP.Core
                         ResolvedExteriorSide = exterior?.SideName,
                         ResolvedExteriorSource = exterior?.Source,
                         ResolvedExteriorDirection = ToCurtainElevationXyz(exterior?.ExteriorDirection),
+                        AddDimensions = addDimensions,
+                        DimensionTypeId = dimensionType?.Id.GetIdValue(),
+                        DimensionTypeName = dimensionType?.Name,
+                        DimensionTypeSource = dimensionTypeResolution.Source,
+                        DimensionWitnessLineLengthPaperMm = dryRunStackOffsetResolution.WitnessLineLengthPaperFt.HasValue
+                            ? Math.Round(dryRunStackOffsetResolution.WitnessLineLengthPaperFt.Value * 304.8, 3)
+                            : (double?)null,
+                        DimensionViewScale = dryRunStackOffsetResolution.ViewScale,
+                        DimensionInnerOffsetExtraPaperMm = Math.Round(dryRunStackOffsetResolution.InnerOffsetExtraPaperFt * 304.8, 3),
+                        DimensionInnerOffsetModelMm = Math.Round(dryRunStackOffsetResolution.InnerOffsetFt * 304.8, 3),
+                        DimensionInnerOffsetSource = dryRunStackOffsetResolution.InnerOffsetSource,
+                        DimensionInnerOffsetFallbackReason = dryRunStackOffsetResolution.InnerOffsetFallbackReason,
+                        DimensionStackOffsetModelMm = Math.Round(dryRunStackOffsetResolution.ResolvedOffsetFt * 304.8, 3),
+                        DimensionStackOffsetSource = dryRunStackOffsetResolution.Source,
+                        DimensionStackOffsetFallbackReason = dryRunStackOffsetResolution.FallbackReason,
+                        DimensionStatus = addDimensions ? "dry_run" : "disabled",
                         IsPersistentOutput = true,
                         DryRun = true
                     });
@@ -320,6 +349,11 @@ namespace RevitMCP.Core
                     ViewTemplateName = viewTemplateName,
                     TemplateCreated = false,
                     TemplateUpdated = false,
+                    AddDimensions = addDimensions,
+                    DimensionTypeId = dimensionType?.Id.GetIdValue(),
+                    DimensionTypeName = dimensionType?.Name,
+                    DimensionTypeSource = dimensionTypeResolution.Source,
+                    DimensionWarnings = dimensionWarnings,
                     Created = created,
                     Skipped = skipped,
                     TemplateWarnings = templateWarnings
@@ -406,7 +440,19 @@ namespace RevitMCP.Core
                         elevationView.Name = viewName;
                         elevationView.Scale = scale;
                         CurtainElevationCropResult cropResult = ConfigureCurtainElevationCrop(doc, elevationView, wall, wallMid, markerPoint, horizontalMarginFt, verticalMarginFt, fallbackDepthFt);
-                        ConfigureCurtainElevationFarClip(elevationView, cropResult.FarClipDepthFt);
+                        ConfigureCurtainElevationFarClip(elevationView, cropResult, templateWarnings);
+                        CurtainElevationDimensionResult dimensionResult = CreateCurtainElevationDimensions(
+                            doc,
+                            elevationView,
+                            wall,
+                            cropResult,
+                            dimensionType,
+                            addDimensions,
+                            dimensionOffsetFt,
+                            dimensionStackOffsetFallbackFt);
+                        doc.Regenerate();
+                        VerifyCurtainElevationDimensionResult(doc, elevationView, dimensionResult);
+                        dimensionWarnings.AddRange(dimensionResult.Warnings.Select(warning => $"Wall {wall.Id.GetIdValue()}: {warning}"));
 
                         createdViews.Add((elevationView, wall, wallMid, markerPoint));
                         created.Add(new
@@ -419,6 +465,26 @@ namespace RevitMCP.Core
                             IsPersistentOutput = true,
                             MarkerId = marker.Id.GetIdValue(),
                             FarClipDepthMm = Math.Round(cropResult.FarClipDepthFt * 304.8, 1),
+                            FarClipMethod = cropResult.FarClipMethod,
+                            FarClipRequestedDepthMm = Math.Round(cropResult.FarClipRequestedDepthFt * 304.8, 1),
+                            FarClipActualOffsetMm = cropResult.FarClipActualOffsetFt.HasValue
+                                ? Math.Round(cropResult.FarClipActualOffsetFt.Value * 304.8, 1)
+                                : (double?)null,
+                            FarClipActualActive = cropResult.FarClipActualActive,
+                            FarClipActualMode = cropResult.FarClipActualMode,
+                            FarClipDepthOrigin = ToCurtainElevationPointMm(cropResult.FarClipDepthOrigin),
+                            FarClipLookDirection = ToCurtainElevationXyz(cropResult.FarClipLookDirection),
+                            FarClipMinCandidateDepthMm = Math.Round(cropResult.FarClipMinCandidateDepthFt * 304.8, 1),
+                            FarClipMaxCandidateDepthMm = Math.Round(cropResult.FarClipMaxCandidateDepthFt * 304.8, 1),
+                            FarClipPositivePointCount = cropResult.FarClipPositivePointCount,
+                            FarClipWarning = cropResult.FarClipWarning,
+                            FarClipMarginMm = Math.Round(cropResult.FarClipMarginFt * 304.8, 1),
+                            FarClipNearestTargetMm = Math.Round(cropResult.FarClipNearestTargetFt * 304.8, 1),
+                            FarClipFarthestTargetMm = Math.Round(cropResult.FarClipFarthestTargetFt * 304.8, 1),
+                            FarClipPointSource = cropResult.FarClipPointSource,
+                            FarClipExtremeContributor = cropResult.FarClipExtremeContributor,
+                            FarClipDepthDeltaMm = Math.Round(cropResult.FarClipDepthDeltaFt * 304.8, 1),
+                            FarClipPass = cropResult.FarClipPass,
                             CropMethod = cropResult.Method,
                             CropPointSource = cropResult.PointSource,
                             CropPointCount = cropResult.PointCount,
@@ -444,6 +510,40 @@ namespace RevitMCP.Core
                             Crop2DExtremeContributors = cropResult.View2DExtremeContributors,
                             CropRegionShapeApplied = cropResult.RegionShapeApplied,
                             CropRegionShapeFallbackReason = cropResult.RegionShapeFallbackReason,
+                            AddDimensions = addDimensions,
+                            DimensionTypeId = dimensionType?.Id.GetIdValue(),
+                            DimensionTypeName = dimensionType?.Name,
+                            DimensionTypeSource = dimensionTypeResolution.Source,
+                            DimensionWitnessLineLengthPaperMm = dimensionResult.DimensionWitnessLineLengthPaperFt.HasValue
+                                ? Math.Round(dimensionResult.DimensionWitnessLineLengthPaperFt.Value * 304.8, 3)
+                                : (double?)null,
+                            DimensionViewScale = dimensionResult.DimensionViewScale,
+                            DimensionInnerOffsetExtraPaperMm = Math.Round(dimensionResult.DimensionInnerOffsetExtraPaperFt * 304.8, 3),
+                            DimensionInnerOffsetModelMm = Math.Round(dimensionResult.DimensionInnerOffsetFt * 304.8, 3),
+                            DimensionInnerOffsetSource = dimensionResult.DimensionInnerOffsetSource,
+                            DimensionInnerOffsetFallbackReason = dimensionResult.DimensionInnerOffsetFallbackReason,
+                            DimensionStackOffsetModelMm = Math.Round(dimensionResult.DimensionStackOffsetFt * 304.8, 3),
+                            DimensionStackOffsetSource = dimensionResult.DimensionStackOffsetSource,
+                            DimensionStackOffsetFallbackReason = dimensionResult.DimensionStackOffsetFallbackReason,
+                            DimensionsCreatedCount = dimensionResult.CreatedCount,
+                            DimensionsFailedCount = dimensionResult.FailedCount,
+                            DimensionAttemptCount = dimensionResult.AttemptCount,
+                            DimensionVerifiedCount = dimensionResult.VerifiedCount,
+                            DimensionStatus = dimensionResult.Status,
+                            TotalWidthDimensionId = dimensionResult.TotalWidthDimensionId?.GetIdValue(),
+                            TotalHeightDimensionId = dimensionResult.TotalHeightDimensionId?.GetIdValue(),
+                            HorizontalGridDimensionId = dimensionResult.HorizontalGridDimensionId?.GetIdValue(),
+                            VerticalGridDimensionId = dimensionResult.VerticalGridDimensionId?.GetIdValue(),
+                            TotalWidthDimensionReferenceSource = dimensionResult.TotalWidthDimensionReferenceSource,
+                            TotalHeightDimensionReferenceSource = dimensionResult.TotalHeightDimensionReferenceSource,
+                            HorizontalGridDimensionReferenceSource = dimensionResult.HorizontalGridDimensionReferenceSource,
+                            VerticalGridDimensionReferenceSource = dimensionResult.VerticalGridDimensionReferenceSource,
+                            GeometryReferenceCount = dimensionResult.GeometryReferenceCount,
+                            GeometryReferenceCategories = dimensionResult.GeometryReferenceCategories,
+                            ReferenceCurveIds = dimensionResult.ReferenceCurveIds.Select(id => id.GetIdValue()).ToList(),
+                            DimensionFallbackReason = dimensionResult.DimensionFallbackReason,
+                            DimensionCreationErrors = dimensionResult.CreationErrors,
+                            DimensionWarnings = dimensionResult.Warnings,
                             DirectionDot = Math.Round(directionResult.DirectionDot, 4),
                             DirectionFixApplied = directionResult.DirectionFixApplied,
                             DesiredLookDirection = ToCurtainElevationXyz(directionResult.DesiredLookDirection),
@@ -480,7 +580,7 @@ namespace RevitMCP.Core
                     {
                         item.View.ViewTemplateId = viewTemplate.Id;
                         CurtainElevationCropResult cropResult = ConfigureCurtainElevationCrop(doc, item.View, item.Wall, item.WallMidPoint, item.MarkerPoint, horizontalMarginFt, verticalMarginFt, fallbackDepthFt);
-                        ConfigureCurtainElevationFarClip(item.View, cropResult.FarClipDepthFt);
+                        ConfigureCurtainElevationFarClip(item.View, cropResult, templateWarnings);
                     }
                 }
 
@@ -501,6 +601,11 @@ namespace RevitMCP.Core
                 ViewTemplateName = viewTemplate?.Name ?? viewTemplateName,
                 TemplateCreated = templateCreated,
                 TemplateUpdated = templateUpdated,
+                AddDimensions = addDimensions,
+                DimensionTypeId = dimensionType?.Id.GetIdValue(),
+                DimensionTypeName = dimensionType?.Name,
+                DimensionTypeSource = dimensionTypeResolution.Source,
+                DimensionWarnings = dimensionWarnings,
                 Created = created,
                 Skipped = skipped,
                 TemplateWarnings = templateWarnings
@@ -1202,6 +1307,24 @@ namespace RevitMCP.Core
         private class CurtainElevationCropResult
         {
             public double FarClipDepthFt { get; set; }
+            public string FarClipMethod { get; set; } = "fallback_depth";
+            public double FarClipRequestedDepthFt { get; set; }
+            public double? FarClipActualOffsetFt { get; set; }
+            public int? FarClipActualActive { get; set; }
+            public int? FarClipActualMode { get; set; }
+            public XYZ FarClipDepthOrigin { get; set; }
+            public XYZ FarClipLookDirection { get; set; }
+            public double FarClipMinCandidateDepthFt { get; set; }
+            public double FarClipMaxCandidateDepthFt { get; set; }
+            public int FarClipPositivePointCount { get; set; }
+            public string FarClipWarning { get; set; }
+            public double FarClipMarginFt { get; set; }
+            public double FarClipNearestTargetFt { get; set; }
+            public double FarClipFarthestTargetFt { get; set; }
+            public string FarClipPointSource { get; set; }
+            public object FarClipExtremeContributor { get; set; }
+            public double FarClipDepthDeltaFt { get; set; }
+            public bool FarClipPass { get; set; }
             public string Method { get; set; } = "view_2d_visible_bounds";
             public string PointSource { get; set; } = "bbox_fallback";
             public int PointCount { get; set; }
@@ -1530,7 +1653,10 @@ namespace RevitMCP.Core
         {
             var result = new CurtainElevationCropResult
             {
-                FarClipDepthFt = fallbackDepthFt
+                FarClipDepthFt = Math.Max(fallbackDepthFt, CurtainElevationFarClipMarginFt),
+                FarClipRequestedDepthFt = Math.Max(fallbackDepthFt, CurtainElevationFarClipMarginFt),
+                FarClipMethod = "fallback_depth_no_target_points",
+                FarClipMarginFt = CurtainElevationFarClipMarginFt
             };
 
             if (view == null || wall == null)
@@ -1577,8 +1703,29 @@ namespace RevitMCP.Core
             if (cropFrameExtents == null)
                 return result;
 
-            double depthFt = Math.Max(cropFrameExtents.Max.Z - cropFrameExtents.Min.Z, 1.0 / 304.8);
-            result.FarClipDepthFt = depthFt;
+            CurtainElevationFarClipResult farClipResult = CalculateCurtainElevationFarClipDepth(
+                view,
+                cropFrame,
+                pointResult.Records,
+                fallbackDepthFt);
+            if (farClipResult != null)
+            {
+                result.FarClipDepthFt = farClipResult.DepthFt;
+                result.FarClipRequestedDepthFt = farClipResult.DepthFt;
+                result.FarClipMethod = farClipResult.Method;
+                result.FarClipDepthOrigin = farClipResult.DepthOrigin;
+                result.FarClipLookDirection = farClipResult.LookDirection;
+                result.FarClipMinCandidateDepthFt = farClipResult.MinCandidateDepthFt;
+                result.FarClipMaxCandidateDepthFt = farClipResult.MaxCandidateDepthFt;
+                result.FarClipPositivePointCount = farClipResult.PositivePointCount;
+                result.FarClipWarning = farClipResult.Warning;
+                result.FarClipMarginFt = farClipResult.MarginFt;
+                result.FarClipNearestTargetFt = farClipResult.NearestTargetFt;
+                result.FarClipFarthestTargetFt = farClipResult.FarthestTargetFt;
+                result.FarClipPointSource = farClipResult.PointSource;
+                result.FarClipExtremeContributor = ToCurtainElevationPointContributor(
+                    farClipResult.ExtremeContributor);
+            }
             result.LocalMin = cropFrameExtents.Min;
             result.LocalMax = cropFrameExtents.Max;
             result.ExtremeContributors = ToCurtainElevationExtremeContributors(view2DExtents);
@@ -2299,12 +2446,6 @@ namespace RevitMCP.Core
             return points;
         }
 
-        private void ConfigureCurtainElevationFarClip(ViewSection view, double depthFt)
-        {
-            SetViewParameterByBuiltInName(view, "VIEWER_BOUND_ACTIVE", 1);
-            SetViewParameterByBuiltInName(view, "VIEWER_BOUND_FAR_CLIPPING", 2);
-            SetViewParameterByBuiltInName(view, "VIEWER_BOUND_OFFSET", depthFt);
-        }
 
         private void SetViewParameterByBuiltInName(View view, string builtInParameterName, double value)
         {
@@ -2339,7 +2480,9 @@ namespace RevitMCP.Core
                 new ElementId((IdType)(int)BuiltInCategory.OST_Doors),
                 new ElementId((IdType)(int)BuiltInCategory.OST_Windows),
                 new ElementId((IdType)(int)BuiltInCategory.OST_Levels),
-                new ElementId((IdType)(int)BuiltInCategory.OST_WallTags)
+                new ElementId((IdType)(int)BuiltInCategory.OST_WallTags),
+                new ElementId((IdType)(int)BuiltInCategory.OST_Dimensions),
+                new ElementId((IdType)(int)BuiltInCategory.OST_Lines)
             };
 
             foreach (Category category in doc.Settings.Categories)
@@ -3713,6 +3856,278 @@ namespace RevitMCP.Core
             material.Transparency = 0;
 
             return material;
+        }
+
+        private const double CurtainElevationFarClipMarginFt = 50.0 / 304.8;
+        private const double CurtainElevationFarClipToleranceFt = 1.0 / 304.8;
+
+        private class CurtainElevationFarClipResult
+        {
+            public double DepthFt { get; set; }
+            public double MarginFt { get; set; }
+            public double NearestTargetFt { get; set; }
+            public double FarthestTargetFt { get; set; }
+            public string Method { get; set; }
+            public string PointSource { get; set; }
+            public CurtainElevationPointRecord ExtremeContributor { get; set; }
+            public string Warning { get; set; }
+            public XYZ DepthOrigin { get; set; }
+            public XYZ LookDirection { get; set; }
+            public double MinCandidateDepthFt { get; set; }
+            public double MaxCandidateDepthFt { get; set; }
+            public int PositivePointCount { get; set; }
+            public double ViewOriginLocalZFt { get; set; }
+            public double LookDirectionLocalZ { get; set; }
+        }
+
+        private CurtainElevationFarClipResult CalculateCurtainElevationFarClipDepth(
+            ViewSection view,
+            Transform cropFrame,
+            List<CurtainElevationPointRecord> records,
+            double fallbackDepthFt)
+        {
+            double safeFallbackDepthFt = Math.Max(fallbackDepthFt, CurtainElevationFarClipMarginFt);
+            if (records == null || records.Count == 0)
+            {
+                return new CurtainElevationFarClipResult
+                {
+                    DepthFt = safeFallbackDepthFt,
+                    MarginFt = CurtainElevationFarClipMarginFt,
+                    Method = "fallback_depth_no_target_points",
+                    PointSource = "none"
+                };
+            }
+
+            XYZ origin = view?.Origin;
+            XYZ lookDirection = GetCurtainElevationVisualLookDirection(view);
+            if (origin == null || lookDirection == null)
+            {
+                return new CurtainElevationFarClipResult
+                {
+                    DepthFt = safeFallbackDepthFt,
+                    MarginFt = CurtainElevationFarClipMarginFt,
+                    Method = "fallback_depth_no_view_origin_or_look_direction",
+                    PointSource = "none",
+                    DepthOrigin = origin,
+                    LookDirection = lookDirection,
+                    Warning = "Cannot resolve view origin or visual look direction; used depthMm fallback."
+                };
+            }
+
+            double viewOriginLocalZ = 0;
+            double lookDirectionLocalZ = 0;
+            string warning = null;
+            if (cropFrame != null)
+            {
+                try
+                {
+                    Transform inverse = cropFrame.Inverse;
+                    viewOriginLocalZ = inverse.OfPoint(origin).Z;
+                    lookDirectionLocalZ = inverse.OfVector(lookDirection).Z;
+                }
+                catch (Exception ex)
+                {
+                    warning = $"Cannot project far clip depth into crop box local Z: {ex.Message}";
+                }
+            }
+            else
+            {
+                warning = "Cannot inspect crop box local Z because crop frame is null.";
+            }
+
+            double minDepth = double.MaxValue;
+            double maxDepth = double.MinValue;
+            double maxPositiveDepth = double.MinValue;
+            double maxAbsDepth = double.MinValue;
+            int positiveCount = 0;
+            CurtainElevationPointRecord maxPositiveRecord = null;
+            CurtainElevationPointRecord maxAbsRecord = null;
+
+            foreach (CurtainElevationPointRecord record in records)
+            {
+                XYZ point = record?.Point;
+                if (point == null)
+                    continue;
+
+                double depth = (point - origin).DotProduct(lookDirection);
+                minDepth = Math.Min(minDepth, depth);
+                maxDepth = Math.Max(maxDepth, depth);
+
+                if (depth > 0)
+                {
+                    positiveCount++;
+                    if (depth > maxPositiveDepth)
+                    {
+                        maxPositiveDepth = depth;
+                        maxPositiveRecord = record;
+                    }
+                }
+
+                double absDepth = Math.Abs(depth);
+                if (absDepth > maxAbsDepth)
+                {
+                    maxAbsDepth = absDepth;
+                    maxAbsRecord = record;
+                }
+            }
+
+            if (maxDepth == double.MinValue)
+            {
+                return new CurtainElevationFarClipResult
+                {
+                    DepthFt = safeFallbackDepthFt,
+                    MarginFt = CurtainElevationFarClipMarginFt,
+                    Method = "fallback_depth_no_target_points",
+                    PointSource = "none",
+                    DepthOrigin = origin,
+                    LookDirection = lookDirection,
+                    Warning = AppendCurtainElevationFarClipWarning(
+                        warning,
+                        "No valid target points after filtering; used depthMm fallback.")
+                };
+            }
+
+            bool hasPositiveDepth = positiveCount > 0;
+            double targetDepthFt = hasPositiveDepth ? maxPositiveDepth : maxAbsDepth;
+            CurtainElevationPointRecord extremeRecord = hasPositiveDepth ? maxPositiveRecord : maxAbsRecord;
+            if (!hasPositiveDepth)
+            {
+                warning = AppendCurtainElevationFarClipWarning(
+                    warning,
+                    "All target point depths were non-positive from view.Origin along visual look direction; used absolute max depth fallback.");
+            }
+
+            return new CurtainElevationFarClipResult
+            {
+                DepthFt = Math.Max(targetDepthFt + CurtainElevationFarClipMarginFt, CurtainElevationFarClipMarginFt),
+                MarginFt = CurtainElevationFarClipMarginFt,
+                NearestTargetFt = minDepth,
+                FarthestTargetFt = maxDepth,
+                Method = hasPositiveDepth
+                    ? "view_origin_to_target_max_depth"
+                    : "view_origin_to_target_abs_depth_fallback",
+                PointSource = extremeRecord?.Source,
+                ExtremeContributor = extremeRecord,
+                Warning = warning,
+                DepthOrigin = origin,
+                LookDirection = lookDirection,
+                MinCandidateDepthFt = minDepth,
+                MaxCandidateDepthFt = maxDepth,
+                PositivePointCount = positiveCount,
+                ViewOriginLocalZFt = viewOriginLocalZ,
+                LookDirectionLocalZ = lookDirectionLocalZ
+            };
+        }
+
+        private void ConfigureCurtainElevationFarClip(
+            ViewSection view,
+            CurtainElevationCropResult result,
+            List<string> warnings)
+        {
+            double depthFt = Math.Max(
+                result?.FarClipDepthFt ?? CurtainElevationFarClipMarginFt,
+                CurtainElevationFarClipMarginFt);
+
+            SetViewParameterByBuiltInName(view, "VIEWER_BOUND_ACTIVE_FAR", 1);
+            SetViewParameterByBuiltInName(view, "VIEWER_BOUND_FAR_CLIPPING", 2);
+            SetViewParameterByBuiltInName(view, "VIEWER_BOUND_OFFSET_FAR", depthFt);
+
+            if (result == null)
+                return;
+
+            result.FarClipRequestedDepthFt = depthFt;
+            try
+            {
+                view?.Document?.Regenerate();
+            }
+            catch (Exception ex)
+            {
+                result.FarClipWarning = AppendCurtainElevationFarClipWarning(
+                    result.FarClipWarning,
+                    $"Document regenerate after far clip write failed: {ex.Message}");
+            }
+
+            result.FarClipActualActive = GetCurtainElevationViewIntegerParameter(
+                view,
+                "VIEWER_BOUND_ACTIVE_FAR");
+            result.FarClipActualMode = GetCurtainElevationViewIntegerParameter(
+                view,
+                "VIEWER_BOUND_FAR_CLIPPING");
+            result.FarClipActualOffsetFt = GetCurtainElevationViewDoubleParameter(
+                view,
+                "VIEWER_BOUND_OFFSET_FAR");
+
+            if (!result.FarClipActualOffsetFt.HasValue)
+            {
+                result.FarClipPass = false;
+                result.FarClipDepthDeltaFt = depthFt;
+                result.FarClipWarning = AppendCurtainElevationFarClipWarning(
+                    result.FarClipWarning,
+                    "Cannot read VIEWER_BOUND_OFFSET_FAR after setting far clip.");
+            }
+            else
+            {
+                result.FarClipDepthDeltaFt = Math.Abs(result.FarClipActualOffsetFt.Value - depthFt);
+                result.FarClipPass = result.FarClipDepthDeltaFt <= CurtainElevationFarClipToleranceFt;
+                if (!result.FarClipPass)
+                {
+                    result.FarClipWarning = AppendCurtainElevationFarClipWarning(
+                        result.FarClipWarning,
+                        $"VIEWER_BOUND_OFFSET_FAR readback differs from requested depth. Requested={Math.Round(depthFt * 304.8, 1)}mm, Actual={Math.Round(result.FarClipActualOffsetFt.Value * 304.8, 1)}mm.");
+                }
+            }
+
+            if (result.FarClipActualActive.HasValue && result.FarClipActualActive.Value != 1)
+            {
+                result.FarClipPass = false;
+                result.FarClipWarning = AppendCurtainElevationFarClipWarning(
+                    result.FarClipWarning,
+                    $"VIEWER_BOUND_ACTIVE_FAR readback is {result.FarClipActualActive.Value}, expected 1.");
+            }
+
+            if (result.FarClipActualMode.HasValue && result.FarClipActualMode.Value != 2)
+            {
+                result.FarClipPass = false;
+                result.FarClipWarning = AppendCurtainElevationFarClipWarning(
+                    result.FarClipWarning,
+                    $"VIEWER_BOUND_FAR_CLIPPING readback is {result.FarClipActualMode.Value}, expected 2.");
+            }
+
+            if (!string.IsNullOrWhiteSpace(result.FarClipWarning))
+                warnings?.Add(result.FarClipWarning);
+        }
+
+        private double? GetCurtainElevationViewDoubleParameter(View view, string builtInParameterName)
+        {
+            if (view == null || !Enum.TryParse(builtInParameterName, out BuiltInParameter bip))
+                return null;
+
+            Parameter parameter = view.get_Parameter(bip);
+            if (parameter == null || parameter.StorageType != StorageType.Double)
+                return null;
+
+            return parameter.AsDouble();
+        }
+
+        private int? GetCurtainElevationViewIntegerParameter(View view, string builtInParameterName)
+        {
+            if (view == null || !Enum.TryParse(builtInParameterName, out BuiltInParameter bip))
+                return null;
+
+            Parameter parameter = view.get_Parameter(bip);
+            if (parameter == null || parameter.StorageType != StorageType.Integer)
+                return null;
+
+            return parameter.AsInteger();
+        }
+
+        private string AppendCurtainElevationFarClipWarning(string current, string warning)
+        {
+            if (string.IsNullOrWhiteSpace(warning))
+                return current;
+            if (string.IsNullOrWhiteSpace(current))
+                return warning;
+            return $"{current} {warning}";
         }
 
         #endregion

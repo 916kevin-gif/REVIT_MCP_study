@@ -32,6 +32,8 @@ $ErrorActionPreference = "Stop"
 $OutputEncoding = [System.Text.Encoding]::UTF8
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 
+. (Join-Path $PSScriptRoot "addin-deployment-path.ps1")
+
 # ============================================================================
 # 全域變數
 # ============================================================================
@@ -739,7 +741,10 @@ else {
                 }
 
                 $targetBase = Join-Path $addinsBase $ver
-                $targetDllDir = Join-Path $targetBase "RevitMCP"
+                $assemblyTarget = Resolve-RevitAddinAssemblyTarget -ManifestPath $addinSource -TargetBase $targetBase
+                $targetDllPath = $assemblyTarget.FullPath
+                $targetDllDir = $assemblyTarget.DirectoryPath
+                $unusedRootDll = Join-Path $targetBase "RevitMCP.dll"
 
                 try {
                     # 建立目錄
@@ -758,7 +763,12 @@ else {
                     }
 
                     # 複製 DLL
-                    Copy-Item -Path $dllSource -Destination (Join-Path $targetDllDir "RevitMCP.dll") -Force -ErrorAction Stop
+                    Copy-Item -Path $dllSource -Destination $targetDllPath -Force -ErrorAction Stop
+                    $sourceDllHash = (Get-FileHash -LiteralPath $dllSource -Algorithm SHA256).Hash
+                    $targetDllHash = (Get-FileHash -LiteralPath $targetDllPath -Algorithm SHA256).Hash
+                    if ($sourceDllHash -ne $targetDllHash) {
+                        throw "部署後 SHA-256 不一致。來源：$sourceDllHash；目標：$targetDllHash"
+                    }
 
                     # 複製 .addin（唯一正規檔案）
                     Copy-Item -Path $addinSource -Destination (Join-Path $targetBase "RevitMCP.addin") -Force -ErrorAction Stop
@@ -775,7 +785,17 @@ else {
                         Copy-Item -Path $closedXmlDll -Destination (Join-Path $targetDllDir "ClosedXML.dll") -Force -ErrorAction SilentlyContinue
                     }
 
-                    Write-OK "Revit $ver 部署完成 -> $targetBase"
+                    if (
+                        (Test-Path -LiteralPath $unusedRootDll) -and
+                        -not [System.IO.Path]::GetFullPath($unusedRootDll).Equals(
+                            [System.IO.Path]::GetFullPath($targetDllPath),
+                            [System.StringComparison]::OrdinalIgnoreCase
+                        )
+                    ) {
+                        Write-Info "Addins 根目錄仍有未被 manifest 引用的 DLL（未刪除）：$unusedRootDll"
+                    }
+
+                    Write-OK "Revit $ver 部署完成並通過 SHA-256 驗證 -> $targetDllPath"
                     Add-Result "Revit $ver" "OK" "Build + Deploy"
                 }
                 catch {
