@@ -123,7 +123,7 @@ export const curtainWallTools: Tool[] = [
     },
     {
         name: "diagnose_curtain_wall_elevation_dimensions",
-        description: "非破壞診斷帷幕立面的尺寸標示；預設 rollback，不留下測試尺寸或參考平面。",
+        description: "非破壞診斷帷幕立面的尺寸標示；比較 inactive/active reference 狀態與四種 CurtainGridLine reference profiles，預設 rollback。",
         inputSchema: {
             type: "object",
             properties: {
@@ -135,6 +135,7 @@ export const curtainWallTools: Tool[] = [
                 rollback: { type: "boolean", description: "是否 rollback 所有診斷元素，預設 true。", default: true },
                 dimensionOffsetMm: { type: "number", description: "DimensionType 無法提供有效輔助線長度時使用的帷幕至內層網格尺寸線距離 fallback，單位 mm，預設 300。正常情況會採用（輔助線長度 + 圖紙 3 mm）乘以視圖比例。", default: 300 },
                 dimensionStackOffsetMm: { type: "number", description: "DimensionType 無法提供有效輔助線長度時使用的內外層尺寸間距 fallback，單位 mm，預設 250。正常情況會採用輔助線長度乘以視圖比例。", default: 250 },
+                verifyAssociationByMove: { type: "boolean", description: "是否在 rollback transaction 內移動一條 CurtainGridLine 10 mm，驗證尺寸段值與 reference 關聯，預設 true。", default: true },
             },
         },
     },

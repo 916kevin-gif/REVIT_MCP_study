@@ -92,9 +92,9 @@ Assert-True ($curtainSource.Contains('parameters["horizontalMarginMm"]?.Value<do
 Assert-True ($curtainSource.Contains('parameters["verticalMarginMm"]?.Value<double>() ?? 0.0')) "vertical crop margin contract changed"
 Assert-True ($curtainSource.Contains('parameters["offsetMm"]?.Value<double>() ?? 1500.0')) "marker offset contract changed"
 Assert-True ($curtainSource.Contains('parameters["depthMm"]?.Value<double>() ?? 1200.0')) "depth fallback contract changed"
-Assert-True ($dimensionSource.Contains("double topGridY = maxY + offsetFt;")) "top grid dimension coordinate changed"
-Assert-True ($dimensionSource.Contains("double topTotalY = topGridY + stackOffsetFt;")) "top total dimension coordinate changed"
-Assert-True ($dimensionSource.Contains("double rightGridX = maxX + offsetFt;")) "right grid dimension coordinate changed"
-Assert-True ($dimensionSource.Contains("double rightTotalX = rightGridX + stackOffsetFt;")) "right total dimension coordinate changed"
+Assert-True ($dimensionSource.Contains("double topGridY = maxY + stackOffsetResolution.InnerOffsetFt;")) "top grid dimension coordinate changed"
+Assert-True ($dimensionSource.Contains("double topTotalY = topGridY + stackOffsetResolution.ResolvedOffsetFt;")) "top total dimension coordinate changed"
+Assert-True ($dimensionSource.Contains("double leftGridX = minX - stackOffsetResolution.InnerOffsetFt;")) "right grid dimension coordinate changed"
+Assert-True ($dimensionSource.Contains("double leftTotalX = leftGridX - stackOffsetResolution.ResolvedOffsetFt;")) "right total dimension coordinate changed"
 
 Write-Host "PASS curtain elevation far clip tests"

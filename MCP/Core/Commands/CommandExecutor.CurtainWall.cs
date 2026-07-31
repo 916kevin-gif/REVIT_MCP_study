@@ -285,8 +285,10 @@ namespace RevitMCP.Core
                 .ToList();
 
             var created = new List<object>();
+            var createdOutputFactories = new List<Func<object>>();
             var skipped = new List<object>();
             var createdViews = new List<(ViewSection View, Wall Wall, XYZ WallMidPoint, XYZ MarkerPoint)>();
+            var dimensionJobs = new List<CurtainElevationDimensionJob>();
             var templateWarnings = new List<string>();
             View viewTemplate = null;
             bool templateCreated = false;
@@ -360,6 +362,11 @@ namespace RevitMCP.Core
                 };
             }
 
+            using (TransactionGroup group = new TransactionGroup(doc, "Create curtain wall elevations"))
+            {
+                group.Start();
+                try
+                {
             using (Transaction trans = TransactionHelper.Begin(doc, "建立帷幕牆外立面視圖"))
             {
                 trans.Start();
@@ -441,21 +448,22 @@ namespace RevitMCP.Core
                         elevationView.Scale = scale;
                         CurtainElevationCropResult cropResult = ConfigureCurtainElevationCrop(doc, elevationView, wall, wallMid, markerPoint, horizontalMarginFt, verticalMarginFt, fallbackDepthFt);
                         ConfigureCurtainElevationFarClip(elevationView, cropResult, templateWarnings);
-                        CurtainElevationDimensionResult dimensionResult = CreateCurtainElevationDimensions(
-                            doc,
-                            elevationView,
-                            wall,
-                            cropResult,
-                            dimensionType,
-                            addDimensions,
-                            dimensionOffsetFt,
-                            dimensionStackOffsetFallbackFt);
+                        var dimensionJob = new CurtainElevationDimensionJob
+                        {
+                            View = elevationView,
+                            Wall = wall,
+                            CropResult = cropResult,
+                            Result = new CurtainElevationDimensionResult
+                            {
+                                WallId = wall.Id,
+                                Status = addDimensions ? "pending_view_activation" : "disabled"
+                            }
+                        };
+                        dimensionJobs.Add(dimensionJob);
                         doc.Regenerate();
-                        VerifyCurtainElevationDimensionResult(doc, elevationView, dimensionResult);
-                        dimensionWarnings.AddRange(dimensionResult.Warnings.Select(warning => $"Wall {wall.Id.GetIdValue()}: {warning}"));
 
                         createdViews.Add((elevationView, wall, wallMid, markerPoint));
-                        created.Add(new
+                        createdOutputFactories.Add(() => new
                         {
                             WallId = wall.Id.GetIdValue(),
                             ViewId = elevationView.Id.GetIdValue(),
@@ -525,36 +533,50 @@ namespace RevitMCP.Core
                             DimensionTypeId = dimensionType?.Id.GetIdValue(),
                             DimensionTypeName = dimensionType?.Name,
                             DimensionTypeSource = dimensionTypeResolution.Source,
-                            DimensionWitnessLineLengthPaperMm = dimensionResult.DimensionWitnessLineLengthPaperFt.HasValue
-                                ? Math.Round(dimensionResult.DimensionWitnessLineLengthPaperFt.Value * 304.8, 3)
+                            DimensionWitnessLineLengthPaperMm = dimensionJob.Result.DimensionWitnessLineLengthPaperFt.HasValue
+                                ? Math.Round(dimensionJob.Result.DimensionWitnessLineLengthPaperFt.Value * 304.8, 3)
                                 : (double?)null,
-                            DimensionViewScale = dimensionResult.DimensionViewScale,
-                            DimensionInnerOffsetExtraPaperMm = Math.Round(dimensionResult.DimensionInnerOffsetExtraPaperFt * 304.8, 3),
-                            DimensionInnerOffsetModelMm = Math.Round(dimensionResult.DimensionInnerOffsetFt * 304.8, 3),
-                            DimensionInnerOffsetSource = dimensionResult.DimensionInnerOffsetSource,
-                            DimensionInnerOffsetFallbackReason = dimensionResult.DimensionInnerOffsetFallbackReason,
-                            DimensionStackOffsetModelMm = Math.Round(dimensionResult.DimensionStackOffsetFt * 304.8, 3),
-                            DimensionStackOffsetSource = dimensionResult.DimensionStackOffsetSource,
-                            DimensionStackOffsetFallbackReason = dimensionResult.DimensionStackOffsetFallbackReason,
-                            DimensionsCreatedCount = dimensionResult.CreatedCount,
-                            DimensionsFailedCount = dimensionResult.FailedCount,
-                            DimensionAttemptCount = dimensionResult.AttemptCount,
-                            DimensionVerifiedCount = dimensionResult.VerifiedCount,
-                            DimensionStatus = dimensionResult.Status,
-                            TotalWidthDimensionId = dimensionResult.TotalWidthDimensionId?.GetIdValue(),
-                            TotalHeightDimensionId = dimensionResult.TotalHeightDimensionId?.GetIdValue(),
-                            HorizontalGridDimensionId = dimensionResult.HorizontalGridDimensionId?.GetIdValue(),
-                            VerticalGridDimensionId = dimensionResult.VerticalGridDimensionId?.GetIdValue(),
-                            TotalWidthDimensionReferenceSource = dimensionResult.TotalWidthDimensionReferenceSource,
-                            TotalHeightDimensionReferenceSource = dimensionResult.TotalHeightDimensionReferenceSource,
-                            HorizontalGridDimensionReferenceSource = dimensionResult.HorizontalGridDimensionReferenceSource,
-                            VerticalGridDimensionReferenceSource = dimensionResult.VerticalGridDimensionReferenceSource,
-                            GeometryReferenceCount = dimensionResult.GeometryReferenceCount,
-                            GeometryReferenceCategories = dimensionResult.GeometryReferenceCategories,
-                            ReferenceCurveIds = dimensionResult.ReferenceCurveIds.Select(id => id.GetIdValue()).ToList(),
-                            DimensionFallbackReason = dimensionResult.DimensionFallbackReason,
-                            DimensionCreationErrors = dimensionResult.CreationErrors,
-                            DimensionWarnings = dimensionResult.Warnings,
+                            DimensionViewScale = dimensionJob.Result.DimensionViewScale,
+                            DimensionInnerOffsetExtraPaperMm = Math.Round(dimensionJob.Result.DimensionInnerOffsetExtraPaperFt * 304.8, 3),
+                            DimensionInnerOffsetModelMm = Math.Round(dimensionJob.Result.DimensionInnerOffsetFt * 304.8, 3),
+                            DimensionInnerOffsetSource = dimensionJob.Result.DimensionInnerOffsetSource,
+                            DimensionInnerOffsetFallbackReason = dimensionJob.Result.DimensionInnerOffsetFallbackReason,
+                            DimensionStackOffsetModelMm = Math.Round(dimensionJob.Result.DimensionStackOffsetFt * 304.8, 3),
+                            DimensionStackOffsetSource = dimensionJob.Result.DimensionStackOffsetSource,
+                            DimensionStackOffsetFallbackReason = dimensionJob.Result.DimensionStackOffsetFallbackReason,
+                            DimensionsCreatedCount = dimensionJob.Result.CreatedCount,
+                            DimensionsFailedCount = dimensionJob.Result.FailedCount,
+                            DimensionAttemptCount = dimensionJob.Result.AttemptCount,
+                            DimensionVerifiedCount = dimensionJob.Result.VerifiedCount,
+                            DimensionStatus = dimensionJob.Result.Status,
+                            TotalWidthDimensionId = dimensionJob.Result.TotalWidthDimensionId?.GetIdValue(),
+                            TotalHeightDimensionId = dimensionJob.Result.TotalHeightDimensionId?.GetIdValue(),
+                            HorizontalGridDimensionId = dimensionJob.Result.HorizontalGridDimensionId?.GetIdValue(),
+                            VerticalGridDimensionId = dimensionJob.Result.VerticalGridDimensionId?.GetIdValue(),
+                            TotalWidthDimensionAreReferencesAvailable = dimensionJob.Result.TotalWidthDimensionAreReferencesAvailable,
+                            HorizontalGridDimensionAreReferencesAvailable = dimensionJob.Result.HorizontalGridDimensionAreReferencesAvailable,
+                            TotalHeightDimensionAreReferencesAvailable = dimensionJob.Result.TotalHeightDimensionAreReferencesAvailable,
+                            VerticalGridDimensionAreReferencesAvailable = dimensionJob.Result.VerticalGridDimensionAreReferencesAvailable,
+                            TotalWidthDimensionReferenceSource = dimensionJob.Result.TotalWidthDimensionReferenceSource,
+                            TotalHeightDimensionReferenceSource = dimensionJob.Result.TotalHeightDimensionReferenceSource,
+                            HorizontalGridDimensionReferenceSource = dimensionJob.Result.HorizontalGridDimensionReferenceSource,
+                            VerticalGridDimensionReferenceSource = dimensionJob.Result.VerticalGridDimensionReferenceSource,
+                            GeometryReferenceCount = dimensionJob.Result.GeometryReferenceCount,
+                            CurtainGridLineCount = dimensionJob.Result.CurtainGridLineCount,
+                            CurtainGridLineReferenceCount = dimensionJob.Result.CurtainGridLineReferenceCount,
+                            CurtainGridLineReferenceFailures = dimensionJob.Result.CurtainGridLineReferenceFailures,
+                            CurtainGridLineReferenceSamples = dimensionJob.Result.CurtainGridLineReferenceSamples,
+                            PostCommitDimensionValidation = dimensionJob.Result.PostCommitDimensionValidation,
+                            GeometryReferenceCategories = dimensionJob.Result.GeometryReferenceCategories,
+                            ReferenceCurveIds = dimensionJob.Result.ReferenceCurveIds.Select(id => id.GetIdValue()).ToList(),
+                            DimensionFallbackReason = dimensionJob.Result.DimensionFallbackReason,
+                            DimensionCreationErrors = dimensionJob.Result.CreationErrors,
+                            DimensionWarnings = dimensionJob.Result.Warnings,
+                            WasViewOpenBeforeDimensioning = dimensionJob.Result.WasViewOpenBeforeDimensioning,
+                            WasViewActiveBeforeDimensioning = dimensionJob.Result.WasViewActiveBeforeDimensioning,
+                            ViewActivationSucceeded = dimensionJob.Result.ViewActivationSucceeded,
+                            ViewActivationFailure = dimensionJob.Result.ViewActivationFailure,
+                            GridReferencePriorityProfile = dimensionJob.Result.GridReferencePriorityProfile,
                             DirectionDot = Math.Round(directionResult.DirectionDot, 4),
                             DirectionFixApplied = directionResult.DirectionFixApplied,
                             DesiredLookDirection = ToCurtainElevationXyz(directionResult.DesiredLookDirection),
@@ -591,11 +613,129 @@ namespace RevitMCP.Core
                     {
                         item.View.ViewTemplateId = viewTemplate.Id;
                         CurtainElevationCropResult cropResult = ConfigureCurtainElevationCrop(doc, item.View, item.Wall, item.WallMidPoint, item.MarkerPoint, horizontalMarginFt, verticalMarginFt, fallbackDepthFt);
+                        CurtainElevationDimensionJob dimensionJob = dimensionJobs.FirstOrDefault(job => job.View.Id == item.View.Id);
+                        if (dimensionJob != null)
+                            dimensionJob.CropResult = cropResult;
                         ConfigureCurtainElevationFarClip(item.View, cropResult, templateWarnings);
                     }
                 }
 
                 trans.Commit();
+            }
+
+                    View originalActiveView = uidoc.ActiveView;
+                    var originallyOpenViewIds = new HashSet<IdType>(
+                        uidoc.GetOpenUIViews().Select(uiView => uiView.ViewId.GetIdValue()));
+                    try
+                    {
+                        foreach (CurtainElevationDimensionJob dimensionJob in dimensionJobs)
+                        {
+                            bool wasOpen = originallyOpenViewIds.Contains(dimensionJob.View.Id.GetIdValue());
+                            bool wasActive = originalActiveView != null && originalActiveView.Id == dimensionJob.View.Id;
+                            bool activationSucceeded = false;
+                            string activationFailure = null;
+
+                            try
+                            {
+                                uidoc.ActiveView = dimensionJob.View;
+                                uidoc.RefreshActiveView();
+                                activationSucceeded = uidoc.ActiveView?.Id == dimensionJob.View.Id;
+                                if (!activationSucceeded)
+                                    activationFailure = "UIDocument.ActiveView did not change to the target elevation.";
+                            }
+                            catch (Exception ex)
+                            {
+                                activationFailure = ex.Message;
+                            }
+
+                            for (int referencePriority = 0; referencePriority <= 3; referencePriority++)
+                            {
+                                var attemptResult = new CurtainElevationDimensionResult
+                                {
+                                    WallId = dimensionJob.Wall.Id,
+                                    WasViewOpenBeforeDimensioning = wasOpen,
+                                    WasViewActiveBeforeDimensioning = wasActive,
+                                    ViewActivationSucceeded = activationSucceeded,
+                                    ViewActivationFailure = activationFailure,
+                                    GridReferencePriorityProfile = referencePriority
+                                };
+
+                                using (Transaction dimensionTransaction = TransactionHelper.Begin(doc, $"建立帷幕牆原生尺寸 profile {referencePriority}"))
+                                {
+                                    dimensionTransaction.Start();
+                                    CreateCurtainElevationDimensions(
+                                        doc,
+                                        dimensionJob.View,
+                                        dimensionJob.Wall,
+                                        dimensionJob.CropResult,
+                                        dimensionType,
+                                        addDimensions,
+                                        dimensionOffsetFt,
+                                        dimensionStackOffsetFallbackFt,
+                                        attemptResult,
+                                        referencePriority,
+                                        referencePriority == 3);
+                                    dimensionTransaction.Commit();
+                                }
+
+                                FinalizeCurtainElevationDimensionsAfterCommit(doc, new[] { attemptResult });
+                                bool nativeGridSucceeded = CurtainElevationGridDimensionsUseNativeReferences(attemptResult);
+                                if (nativeGridSucceeded || referencePriority == 3 || !addDimensions)
+                                {
+                                    dimensionJob.Result = attemptResult;
+                                    break;
+                                }
+
+                                using (Transaction cleanupTransaction = TransactionHelper.Begin(doc, $"清理失敗帷幕牆尺寸 profile {referencePriority}"))
+                                {
+                                    cleanupTransaction.Start();
+                                    DeleteCurtainElevationDimensionArtifacts(doc, attemptResult);
+                                    cleanupTransaction.Commit();
+                                }
+                            }
+
+                            VerifyCurtainElevationDimensionResult(doc, dimensionJob.View, dimensionJob.Result);
+                            dimensionWarnings.AddRange(dimensionJob.Result.Warnings.Select(warning =>
+                                $"Wall {dimensionJob.Wall.Id.GetIdValue()}: {warning}"));
+                        }
+                    }
+                    finally
+                    {
+                        try
+                        {
+                            if (originalActiveView != null && doc.GetElement(originalActiveView.Id) != null)
+                            {
+                                uidoc.ActiveView = originalActiveView;
+                                uidoc.RefreshActiveView();
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            dimensionWarnings.Add("Failed to restore original ActiveView: " + ex.Message);
+                        }
+
+                        foreach (UIView uiView in uidoc.GetOpenUIViews().ToList())
+                        {
+                            if (originallyOpenViewIds.Contains(uiView.ViewId.GetIdValue()) ||
+                                uiView.ViewId == uidoc.ActiveView?.Id)
+                            {
+                                continue;
+                            }
+
+                            try { uiView.Close(); }
+                            catch (Exception ex) { dimensionWarnings.Add($"Failed to close temporary view tab {uiView.ViewId.GetIdValue()}: {ex.Message}"); }
+                        }
+                    }
+
+                    created.AddRange(createdOutputFactories.Select(factory => factory()));
+                    group.Assimilate();
+                }
+                catch
+                {
+                    if (group.GetStatus() == TransactionStatus.Started)
+                        group.RollBack();
+                    throw;
+                }
             }
 
             return new

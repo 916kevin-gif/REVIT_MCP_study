@@ -21,45 +21,38 @@ namespace RevitMCP.Core
         {
             Document doc = _uiApp.ActiveUIDocument.Document;
             UIDocument uidoc = _uiApp.ActiveUIDocument;
-
             string testMode = parameters["testMode"]?.Value<string>()?.Trim().ToLowerInvariant() ?? "both";
             bool rollback = parameters["rollback"]?.Value<bool>() ?? true;
             double fallbackInnerOffsetFt = (parameters["dimensionOffsetMm"]?.Value<double>() ?? 300.0) / 304.8;
             double fallbackStackOffsetFt = (parameters["dimensionStackOffsetMm"]?.Value<double>() ?? 250.0) / 304.8;
             var failures = new List<string>();
-            var attempts = new List<CurtainElevationDimensionAttempt>();
+            var backgroundAttempts = new List<CurtainElevationDimensionAttempt>();
+            var activeProfileAttempts = new List<CurtainElevationDimensionAttempt>();
             var createdDimensionIds = new List<ElementId>();
             var verifiedDimensionIds = new List<ElementId>();
             var referencePlaneIds = new List<ElementId>();
             var dimensionWarnings = new List<string>();
+            object associationMoveTest = null;
 
-            ViewSection view = null;
             IdType? viewId = parameters["viewId"]?.Value<IdType>();
-            if (viewId.HasValue)
-                view = doc.GetElement(new ElementId(viewId.Value)) as ViewSection;
-            else
-                view = uidoc.ActiveView as ViewSection;
-
+            ViewSection view = viewId.HasValue
+                ? doc.GetElement(new ElementId(viewId.Value)) as ViewSection
+                : uidoc.ActiveView as ViewSection;
             if (view == null || view.IsTemplate)
                 throw new Exception("Provide a valid elevation ViewSection viewId or make one active.");
 
-            Wall wall = null;
             IdType? wallId = parameters["wallId"]?.Value<IdType>();
-            if (wallId.HasValue)
-                wall = doc.GetElement(new ElementId(wallId.Value)) as Wall;
-            else
-            {
-                wall = new FilteredElementCollector(doc)
+            Wall wall = wallId.HasValue
+                ? doc.GetElement(new ElementId(wallId.Value)) as Wall
+                : new FilteredElementCollector(doc)
                     .OfClass(typeof(Wall))
                     .WhereElementIsNotElementType()
                     .Cast<Wall>()
-                    .FirstOrDefault(w =>
+                    .FirstOrDefault(candidate =>
                     {
-                        try { return w.CurtainGrid != null; }
+                        try { return candidate.CurtainGrid != null; }
                         catch { return false; }
                     });
-            }
-
             if (wall == null || wall.CurtainGrid == null)
                 throw new Exception("Provide a valid curtain wall wallId (Wall with CurtainGrid).");
 
@@ -73,104 +66,311 @@ namespace RevitMCP.Core
             if (!string.IsNullOrWhiteSpace(stackOffsetResolution.Warning))
                 dimensionWarnings.Add(stackOffsetResolution.Warning);
 
-            int referencePlaneCreatedCount = 0;
+            View originalActiveView = uidoc.ActiveView;
+            var originallyOpenViewIds = new HashSet<IdType>(uidoc.GetOpenUIViews().Select(uiView => uiView.ViewId.GetIdValue()));
+            bool wasViewOpen = originallyOpenViewIds.Contains(view.Id.GetIdValue());
+            bool wasViewActive = originalActiveView?.Id == view.Id;
+            bool inactiveControlEstablished = !wasViewActive;
+            string inactiveControlFailure = null;
+            bool activationSucceeded = false;
+            string activationFailure = null;
             int referencePlaneReferenceCount = 0;
             List<CurtainElevationGeometryReference> geometryReferences = new List<CurtainElevationGeometryReference>();
             List<CurtainElevationGeometryReference> horizontalBoundaryReferences = new List<CurtainElevationGeometryReference>();
-            List<CurtainElevationGeometryReference> gridLineReferences = new List<CurtainElevationGeometryReference>();
+            List<CurtainElevationGeometryReference> priorityZeroGridReferences = new List<CurtainElevationGeometryReference>();
+            var curtainGridLineReferenceFailures = new List<string>();
+            var curtainGridLineReferenceSamples = new List<object>();
             CurtainElevationCropResult cropResult = null;
+            Transform frame = null;
+            double minX = 0;
+            double maxX = 0;
+            double minY = 0;
+            double maxY = 0;
+            double topGridY = 0;
+            double topTotalY = 0;
+            double leftGridX = 0;
+            double leftTotalX = 0;
+            List<double> verticalGridXs = new List<double>();
+            List<double> horizontalGridYs = new List<double>();
 
-            using (Transaction trans = new Transaction(doc, rollback ? "Diagnose curtain elevation dimensions (Rollback)" : "Diagnose curtain elevation dimensions"))
+            using (TransactionGroup group = new TransactionGroup(doc, rollback
+                ? "Diagnose curtain elevation ActiveView references (Rollback)"
+                : "Diagnose curtain elevation ActiveView references"))
             {
-                trans.Start();
-
+                group.Start();
                 try
                 {
-                    LocationCurve loc = wall.Location as LocationCurve;
-                    XYZ wallMid = loc?.Curve?.Evaluate(0.5, true);
-                    cropResult = ConfigureCurtainElevationCrop(doc, view, wall, wallMid, view.Origin, 0, 0, 1200.0 / 304.8);
-                    doc.Regenerate();
+                    using (Transaction setup = TransactionHelper.Begin(doc, "準備帷幕牆尺寸 ActiveView 對照診斷"))
+                    {
+                        setup.Start();
+                        LocationCurve loc = wall.Location as LocationCurve;
+                        XYZ wallMid = loc?.Curve?.Evaluate(0.5, true);
+                        cropResult = ConfigureCurtainElevationCrop(doc, view, wall, wallMid, view.Origin, 0, 0, 1200.0 / 304.8);
+                        doc.Regenerate();
+                        Transform sourceFrame = GetCurtainElevationView2DFrame(view, view.CropBox?.Transform);
+                        frame = GetCurtainElevationDimensionFrame(view, sourceFrame);
+                        if (frame == null || sourceFrame == null || cropResult.View2DMin == null || cropResult.View2DMax == null)
+                            throw new Exception("Cannot resolve dimension frame or crop 2D bounds.");
 
-                    Transform sourceFrame = GetCurtainElevationView2DFrame(view, view.CropBox?.Transform);
-                    Transform frame = GetCurtainElevationDimensionFrame(view, sourceFrame);
-                    if (frame == null || sourceFrame == null || cropResult.View2DMin == null || cropResult.View2DMax == null)
-                    {
-                        failures.Add("Cannot resolve dimension frame or crop 2D bounds.");
-                    }
-                    else if (dimensionType != null)
-                    {
                         XYZ sourceOriginDelta = sourceFrame.Origin - frame.Origin;
                         double xShift = sourceOriginDelta.DotProduct(frame.BasisX);
                         double yShift = sourceOriginDelta.DotProduct(frame.BasisY);
-                        double minX = (cropResult.WallBoundaryMinXFt ?? cropResult.View2DMin.X) + xShift;
-                        double maxX = (cropResult.WallBoundaryMaxXFt ?? cropResult.View2DMax.X) + xShift;
-                        double minY = cropResult.View2DMin.Y + yShift;
-                        double maxY = cropResult.View2DMax.Y + yShift;
-                        double topGridY = maxY + stackOffsetResolution.InnerOffsetFt;
-                        double topTotalY = topGridY + stackOffsetResolution.ResolvedOffsetFt;
-                        double leftGridX = minX - stackOffsetResolution.InnerOffsetFt;
-                        double leftTotalX = leftGridX - stackOffsetResolution.ResolvedOffsetFt;
-
+                        minX = (cropResult.WallBoundaryMinXFt ?? cropResult.View2DMin.X) + xShift;
+                        maxX = (cropResult.WallBoundaryMaxXFt ?? cropResult.View2DMax.X) + xShift;
+                        minY = cropResult.View2DMin.Y + yShift;
+                        maxY = cropResult.View2DMax.Y + yShift;
+                        topGridY = maxY + stackOffsetResolution.InnerOffsetFt;
+                        topTotalY = topGridY + stackOffsetResolution.ResolvedOffsetFt;
+                        leftGridX = minX - stackOffsetResolution.InnerOffsetFt;
+                        leftTotalX = leftGridX - stackOffsetResolution.ResolvedOffsetFt;
                         geometryReferences = CollectCurtainElevationGeometryReferences(doc, wall, view, frame, minX, maxX, minY, maxY);
                         horizontalBoundaryReferences = CollectCurtainElevationGeometryReferences(doc, wall, view, frame, minX, maxX, minY, maxY, true);
-                        gridLineReferences = CollectCurtainElevationGridLineReferences(doc, wall, view, frame, minX, maxX, minY, maxY);
-                        if (testMode == "geometry_reference" || testMode == "both")
-                        {
-                            List<CurtainElevationGeometryReference> totalWidthRefs = SelectCurtainElevationBoundaryReferences(horizontalBoundaryReferences, "horizontal", minX, maxX, minY, maxY, 1.0 / 304.8);
-                            attempts.Add(TryDiagnoseCurtainGeometryDimension(doc, view, frame, dimensionType, "total_width", "horizontal", new List<double> { minX, maxX }, totalWidthRefs, topTotalY));
-
-                            List<CurtainElevationGeometryReference> totalHeightRefs = SelectCurtainElevationBoundaryReferences(geometryReferences, "vertical", minX, maxX, minY, maxY);
-                            attempts.Add(TryDiagnoseCurtainGeometryDimension(doc, view, frame, dimensionType, "total_height", "vertical", new List<double> { minY, maxY }, totalHeightRefs, leftTotalX));
-
-                            List<double> verticalGridXs = GetCurtainElevationGridCoordinates(doc, wall, frame, "vertical", minX, maxX, minY, maxY);
-                            List<CurtainElevationGeometryReference> verticalGridRefs = SelectCurtainElevationGridDimensionReferences(horizontalBoundaryReferences, gridLineReferences, "horizontal", verticalGridXs);
-                            attempts.Add(TryDiagnoseCurtainGeometryDimension(doc, view, frame, dimensionType, "horizontal_grid", "horizontal", verticalGridXs, verticalGridRefs, topGridY));
-
-                            List<double> horizontalGridYs = GetCurtainElevationGridCoordinates(doc, wall, frame, "horizontal", minX, maxX, minY, maxY);
-                            List<CurtainElevationGeometryReference> horizontalGridRefs = SelectCurtainElevationGridDimensionReferences(geometryReferences, gridLineReferences, "vertical", horizontalGridYs);
-                            attempts.Add(TryDiagnoseCurtainGeometryDimension(doc, view, frame, dimensionType, "vertical_grid", "vertical", horizontalGridYs, horizontalGridRefs, leftGridX));
-                        }
-
-                        if (testMode == "reference_plane_fallback" || testMode == "both")
-                        {
-                            attempts.Add(TryDiagnoseCurtainReferencePlaneDimension(doc, view, frame, dimensionType, "total_width", "horizontal", new List<double> { minX, maxX }, minY, maxY, topTotalY, referencePlaneIds, out int widthRefs));
-                            referencePlaneReferenceCount += widthRefs;
-
-                            attempts.Add(TryDiagnoseCurtainReferencePlaneDimension(doc, view, frame, dimensionType, "total_height", "vertical", new List<double> { minY, maxY }, minX, maxX, leftTotalX, referencePlaneIds, out int heightRefs));
-                            referencePlaneReferenceCount += heightRefs;
-                        }
+                        priorityZeroGridReferences = CollectCurtainElevationGridLineReferences(
+                            doc, wall, view, frame, minX, maxX, minY, maxY,
+                            curtainGridLineReferenceFailures, curtainGridLineReferenceSamples, 0);
+                        verticalGridXs = GetCurtainElevationGridCoordinates(doc, wall, frame, "vertical", minX, maxX, minY, maxY);
+                        horizontalGridYs = GetCurtainElevationGridCoordinates(doc, wall, frame, "horizontal", minX, maxX, minY, maxY);
+                        setup.Commit();
                     }
 
-                    doc.Regenerate();
-
-                    foreach (CurtainElevationDimensionAttempt attempt in attempts)
+                    if (wasViewActive)
                     {
-                        if (attempt?.DimensionId == null || attempt.DimensionId == ElementId.InvalidElementId)
-                            continue;
+                        View alternateView = uidoc.GetOpenUIViews()
+                            .Where(uiView => uiView.ViewId != view.Id)
+                            .Select(uiView => doc.GetElement(uiView.ViewId) as View)
+                            .FirstOrDefault(candidate => candidate != null && !candidate.IsTemplate);
+                        if (alternateView == null)
+                        {
+                            alternateView = new FilteredElementCollector(doc)
+                                .OfClass(typeof(View))
+                                .Cast<View>()
+                                .FirstOrDefault(candidate => !candidate.IsTemplate && candidate.Id != view.Id && candidate.CanBePrinted);
+                        }
 
-                        createdDimensionIds.Add(attempt.DimensionId);
-                        Dimension dimension = doc.GetElement(attempt.DimensionId) as Dimension;
-                        attempt.ExistsAfterCreate = dimension != null;
-                        attempt.OwnerViewId = dimension?.OwnerViewId;
-                        if (dimension != null && dimension.OwnerViewId == view.Id)
-                            verifiedDimensionIds.Add(attempt.DimensionId);
-                        else if (dimension != null)
-                            attempt.FailureMessage = AppendCurtainElevationWarning(attempt.FailureMessage, $"OwnerViewId readback mismatch: {dimension.OwnerViewId.GetIdValue()}.");
+                        if (alternateView != null)
+                        {
+                            try
+                            {
+                                uidoc.ActiveView = alternateView;
+                                uidoc.RefreshActiveView();
+                                inactiveControlEstablished = uidoc.ActiveView?.Id != view.Id;
+                            }
+                            catch (Exception ex)
+                            {
+                                inactiveControlFailure = ex.Message;
+                            }
+                        }
+                        else
+                        {
+                            inactiveControlFailure = "No alternate graphical view was available to make the target elevation inactive.";
+                        }
                     }
 
-                    referencePlaneCreatedCount = referencePlaneIds.Count;
+                    if (dimensionType != null)
+                    {
+                        using (Transaction backgroundTransaction = TransactionHelper.Begin(doc, "建立 inactive 帷幕牆尺寸對照"))
+                        {
+                            backgroundTransaction.Start();
+                            if (testMode == "geometry_reference" || testMode == "both")
+                            {
+                                List<CurtainElevationGeometryReference> widthRefs = SelectCurtainElevationBoundaryReferences(horizontalBoundaryReferences, "horizontal", minX, maxX, minY, maxY, 1.0 / 304.8);
+                                List<CurtainElevationGeometryReference> heightRefs = SelectCurtainElevationBoundaryReferences(geometryReferences, "vertical", minX, maxX, minY, maxY);
+                                List<CurtainElevationGeometryReference> horizontalGridRefs = SelectCurtainElevationGridDimensionReferences(horizontalBoundaryReferences, priorityZeroGridReferences, "horizontal", verticalGridXs);
+                                List<CurtainElevationGeometryReference> verticalGridRefs = SelectCurtainElevationGridDimensionReferences(geometryReferences, priorityZeroGridReferences, "vertical", horizontalGridYs);
+                                backgroundAttempts.Add(TryDiagnoseCurtainGeometryDimension(doc, view, frame, dimensionType, "total_width", "horizontal", new List<double> { minX, maxX }, widthRefs, topTotalY));
+                                backgroundAttempts.Add(TryDiagnoseCurtainGeometryDimension(doc, view, frame, dimensionType, "total_height", "vertical", new List<double> { minY, maxY }, heightRefs, leftTotalX));
+                                backgroundAttempts.Add(TryDiagnoseCurtainGeometryDimension(doc, view, frame, dimensionType, "horizontal_grid", "horizontal", verticalGridXs, horizontalGridRefs, topGridY));
+                                backgroundAttempts.Add(TryDiagnoseCurtainGeometryDimension(doc, view, frame, dimensionType, "vertical_grid", "vertical", horizontalGridYs, verticalGridRefs, leftGridX));
+                            }
+
+                            if (testMode == "reference_plane_fallback" || testMode == "both")
+                            {
+                                backgroundAttempts.Add(TryDiagnoseCurtainReferencePlaneDimension(doc, view, frame, dimensionType, "total_width", "horizontal", new List<double> { minX, maxX }, minY, maxY, topTotalY, referencePlaneIds, out int widthRefs));
+                                referencePlaneReferenceCount += widthRefs;
+                                backgroundAttempts.Add(TryDiagnoseCurtainReferencePlaneDimension(doc, view, frame, dimensionType, "total_height", "vertical", new List<double> { minY, maxY }, minX, maxX, leftTotalX, referencePlaneIds, out int heightRefs));
+                                referencePlaneReferenceCount += heightRefs;
+                            }
+                            backgroundTransaction.Commit();
+                        }
+                    }
+
+                    bool backgroundViewOpen = uidoc.GetOpenUIViews().Any(uiView => uiView.ViewId == view.Id);
+                    bool backgroundViewActive = uidoc.ActiveView?.Id == view.Id;
+                    foreach (CurtainElevationDimensionAttempt attempt in backgroundAttempts)
+                    {
+                        if (attempt.DimensionId != null && attempt.DimensionId != ElementId.InvalidElementId)
+                            createdDimensionIds.Add(attempt.DimensionId);
+                        attempt.InactivePostCommitState = CaptureCurtainElevationDimensionReferenceState(
+                            doc, view, attempt, "inactive_post_commit", backgroundViewOpen, backgroundViewActive, true);
+                    }
+
+                    try
+                    {
+                        uidoc.ActiveView = view;
+                        uidoc.RefreshActiveView();
+                        activationSucceeded = uidoc.ActiveView?.Id == view.Id;
+                        if (!activationSucceeded)
+                            activationFailure = "UIDocument.ActiveView did not change to the diagnostic elevation.";
+                    }
+                    catch (Exception ex)
+                    {
+                        activationFailure = ex.Message;
+                    }
+
+                    bool activeViewOpen = uidoc.GetOpenUIViews().Any(uiView => uiView.ViewId == view.Id);
+                    bool activeViewActive = uidoc.ActiveView?.Id == view.Id;
+                    foreach (CurtainElevationDimensionAttempt attempt in backgroundAttempts)
+                    {
+                        attempt.AfterViewActivationState = CaptureCurtainElevationDimensionReferenceState(
+                            doc, view, attempt, "same_dimension_after_view_activation", activeViewOpen, activeViewActive, false);
+                    }
+
+                    if (dimensionType != null && (testMode == "geometry_reference" || testMode == "both"))
+                    {
+                        for (int referencePriority = 0; referencePriority <= 3; referencePriority++)
+                        {
+                            var profileFailures = new List<string>();
+                            var profileSamples = new List<object>();
+                            List<CurtainElevationGeometryReference> profileGridReferences = CollectCurtainElevationGridLineReferences(
+                                doc, wall, view, frame, minX, maxX, minY, maxY,
+                                profileFailures, profileSamples, referencePriority);
+                            curtainGridLineReferenceFailures.AddRange(profileFailures);
+                            curtainGridLineReferenceSamples.AddRange(profileSamples);
+                            List<CurtainElevationGeometryReference> horizontalGridRefs = SelectCurtainElevationGridDimensionReferences(horizontalBoundaryReferences, profileGridReferences, "horizontal", verticalGridXs);
+                            List<CurtainElevationGeometryReference> verticalGridRefs = SelectCurtainElevationGridDimensionReferences(geometryReferences, profileGridReferences, "vertical", horizontalGridYs);
+                            var profileAttempts = new List<CurtainElevationDimensionAttempt>();
+
+                            using (Transaction activeTransaction = TransactionHelper.Begin(doc, $"建立 active 帷幕牆尺寸 profile {referencePriority}"))
+                            {
+                                activeTransaction.Start();
+                                if (referencePriority == 0)
+                                {
+                                    List<CurtainElevationGeometryReference> widthRefs = SelectCurtainElevationBoundaryReferences(horizontalBoundaryReferences, "horizontal", minX, maxX, minY, maxY, 1.0 / 304.8);
+                                    List<CurtainElevationGeometryReference> heightRefs = SelectCurtainElevationBoundaryReferences(geometryReferences, "vertical", minX, maxX, minY, maxY);
+                                    profileAttempts.Add(TryDiagnoseCurtainGeometryDimension(doc, view, frame, dimensionType, "total_width_active", "horizontal", new List<double> { minX, maxX }, widthRefs, topTotalY));
+                                    profileAttempts.Add(TryDiagnoseCurtainGeometryDimension(doc, view, frame, dimensionType, "total_height_active", "vertical", new List<double> { minY, maxY }, heightRefs, leftTotalX));
+                                }
+                                profileAttempts.Add(TryDiagnoseCurtainGeometryDimension(doc, view, frame, dimensionType, $"horizontal_grid_active_profile_{referencePriority}", "horizontal", verticalGridXs, horizontalGridRefs, topGridY));
+                                profileAttempts.Add(TryDiagnoseCurtainGeometryDimension(doc, view, frame, dimensionType, $"vertical_grid_active_profile_{referencePriority}", "vertical", horizontalGridYs, verticalGridRefs, leftGridX));
+                                activeTransaction.Commit();
+                            }
+
+                            foreach (CurtainElevationDimensionAttempt attempt in profileAttempts)
+                            {
+                                if (attempt.DimensionId != null && attempt.DimensionId != ElementId.InvalidElementId)
+                                    createdDimensionIds.Add(attempt.DimensionId);
+                                attempt.ReferencePriorityProfile = referencePriority;
+                                attempt.ActivePostCommitState = CaptureCurtainElevationDimensionReferenceState(
+                                    doc, view, attempt, $"active_post_commit_profile_{referencePriority}", true, true, true);
+                                if (attempt.ActivePostCommitState.ValidationPassed)
+                                    verifiedDimensionIds.Add(attempt.DimensionId);
+                            }
+                            activeProfileAttempts.AddRange(profileAttempts);
+                        }
+                    }
+
+                    if (parameters["verifyAssociationByMove"]?.Value<bool>() ?? true)
+                    {
+                        CurtainElevationDimensionAttempt moveAttempt = activeProfileAttempts.FirstOrDefault(attempt =>
+                            attempt.ReferencePriorityProfile == 0 &&
+                            attempt.ActivePostCommitState?.ValidationPassed == true &&
+                            attempt.ExpectedCurtainGridLineIds.Count > 0 &&
+                            (attempt.Name.StartsWith("horizontal_grid") || attempt.Name.StartsWith("vertical_grid")));
+                        if (moveAttempt != null)
+                        {
+                            ElementId gridLineId = new ElementId(moveAttempt.ExpectedCurtainGridLineIds.First());
+                            using (Transaction moveTransaction = TransactionHelper.Begin(doc, "驗證 CurtainGridLine 尺寸關聯 10mm"))
+                            {
+                                moveTransaction.Start();
+                                try
+                                {
+                                    Dimension dimension = doc.GetElement(moveAttempt.DimensionId) as Dimension;
+                                    List<double> beforeValues = GetCurtainElevationDimensionValuesMm(dimension);
+                                    XYZ moveVector = moveAttempt.Name.StartsWith("horizontal_grid")
+                                        ? frame.BasisX.Multiply(10.0 / 304.8)
+                                        : frame.BasisY.Multiply(10.0 / 304.8);
+                                    ElementTransformUtils.MoveElement(doc, gridLineId, moveVector);
+                                    doc.Regenerate();
+                                    List<double> afterValues = GetCurtainElevationDimensionValuesMm(dimension);
+                                    bool valuesChanged = beforeValues.Count == afterValues.Count &&
+                                        beforeValues.Zip(afterValues, (before, after) => Math.Abs(before - after) > 0.01).Any(changed => changed);
+                                    CurtainElevationDimensionReferenceState movedState = CaptureCurtainElevationDimensionReferenceState(
+                                        doc, view, moveAttempt, "after_curtain_gridline_move_10mm", true, true, false);
+                                    associationMoveTest = new
+                                    {
+                                        AttemptName = moveAttempt.Name,
+                                        DimensionId = moveAttempt.DimensionId.GetIdValue(),
+                                        CurtainGridLineId = gridLineId.GetIdValue(),
+                                        MoveDistanceMm = 10.0,
+                                        BeforeSegmentValuesMm = beforeValues,
+                                        AfterSegmentValuesMm = afterValues,
+                                        SegmentValuesChanged = valuesChanged,
+                                        ReferencesRemainAvailable = movedState.AreReferencesAvailable,
+                                        StableRepresentationRoundTripPassed = movedState.StableRepresentationRoundTripPassed,
+                                        Passed = valuesChanged && movedState.ValidationPassed
+                                    };
+                                }
+                                catch (Exception ex)
+                                {
+                                    associationMoveTest = new
+                                    {
+                                        AttemptName = moveAttempt.Name,
+                                        CurtainGridLineId = gridLineId.GetIdValue(),
+                                        MoveDistanceMm = 10.0,
+                                        Passed = false,
+                                        FailureReason = ex.Message
+                                    };
+                                }
+                                finally
+                                {
+                                    moveTransaction.RollBack();
+                                }
+                            }
+                        }
+                        else
+                        {
+                            associationMoveTest = new { Passed = false, FailureReason = "No valid priority-0 native grid dimension was available for the 10 mm association test." };
+                        }
+                    }
+
+                    try
+                    {
+                        if (originalActiveView != null && doc.GetElement(originalActiveView.Id) != null)
+                        {
+                            uidoc.ActiveView = originalActiveView;
+                            uidoc.RefreshActiveView();
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        failures.Add("Failed to restore original ActiveView before rollback: " + ex.Message);
+                    }
 
                     if (rollback)
-                        trans.RollBack();
+                        group.RollBack();
                     else
-                        trans.Commit();
+                        group.Assimilate();
                 }
                 catch (Exception ex)
                 {
                     failures.Add(ex.Message);
-                    if (trans.GetStatus() == TransactionStatus.Started)
-                        trans.RollBack();
+                    try
+                    {
+                        if (originalActiveView != null && doc.GetElement(originalActiveView.Id) != null)
+                            uidoc.ActiveView = originalActiveView;
+                    }
+                    catch { }
+                    if (group.GetStatus() == TransactionStatus.Started)
+                        group.RollBack();
                 }
+            }
+
+            foreach (UIView uiView in uidoc.GetOpenUIViews().ToList())
+            {
+                if (originallyOpenViewIds.Contains(uiView.ViewId.GetIdValue()) || uiView.ViewId == uidoc.ActiveView?.Id)
+                    continue;
+                try { uiView.Close(); }
+                catch (Exception ex) { failures.Add($"Failed to close diagnostic view tab {uiView.ViewId.GetIdValue()}: {ex.Message}"); }
             }
 
             return new
@@ -178,54 +378,34 @@ namespace RevitMCP.Core
                 WallId = wall.Id.GetIdValue(),
                 ViewId = view.Id.GetIdValue(),
                 ViewName = view.Name,
+                WasViewOpen = wasViewOpen,
+                WasViewActive = wasViewActive,
+                InactiveControlEstablished = inactiveControlEstablished,
+                InactiveControlFailure = inactiveControlFailure,
+                ActivationSucceeded = activationSucceeded,
+                ActivationFailure = activationFailure,
                 DimensionTypeId = dimensionType?.Id.GetIdValue(),
                 DimensionTypeName = dimensionType?.Name,
                 DimensionTypeSource = dimensionTypeResolution.Source,
-                DimensionWitnessLineLengthPaperMm = stackOffsetResolution.WitnessLineLengthPaperFt.HasValue
-                    ? Math.Round(stackOffsetResolution.WitnessLineLengthPaperFt.Value * 304.8, 3)
-                    : (double?)null,
-                DimensionViewScale = stackOffsetResolution.ViewScale,
-                DimensionInnerOffsetExtraPaperMm = Math.Round(stackOffsetResolution.InnerOffsetExtraPaperFt * 304.8, 3),
-                DimensionInnerOffsetModelMm = Math.Round(stackOffsetResolution.InnerOffsetFt * 304.8, 3),
-                DimensionInnerOffsetSource = stackOffsetResolution.InnerOffsetSource,
-                DimensionInnerOffsetFallbackReason = stackOffsetResolution.InnerOffsetFallbackReason,
-                DimensionStackOffsetModelMm = Math.Round(stackOffsetResolution.ResolvedOffsetFt * 304.8, 3),
-                DimensionStackOffsetSource = stackOffsetResolution.Source,
-                DimensionStackOffsetFallbackReason = stackOffsetResolution.FallbackReason,
-                CurtainHorizontalBoundarySource = cropResult?.HorizontalBoundarySource,
-                CurtainHorizontalBoundaryFallbackReason = cropResult?.HorizontalBoundaryFallbackReason,
-                CurtainBoundaryMinXmm = cropResult?.WallBoundaryMinXFt.HasValue == true
-                    ? Math.Round(cropResult.WallBoundaryMinXFt.Value * 304.8, 2)
-                    : (double?)null,
-                CurtainBoundaryMaxXmm = cropResult?.WallBoundaryMaxXFt.HasValue == true
-                    ? Math.Round(cropResult.WallBoundaryMaxXFt.Value * 304.8, 2)
-                    : (double?)null,
                 DimensionWarnings = dimensionWarnings,
                 GeometryReferenceCount = geometryReferences.Count,
-                GeometryReferenceSamples = geometryReferences
-                    .Take(20)
-                    .Select(r => new
-                    {
-                        ElementId = r.ElementId?.GetIdValue(),
-                        Category = r.CategoryName,
-                        IsVertical = r.IsVertical,
-                        IsHorizontal = r.IsHorizontal,
-                        CenterXmm = Math.Round(r.CenterX * 304.8, 1),
-                        CenterYmm = Math.Round(r.CenterY * 304.8, 1),
-                        LengthMm = Math.Round(r.Length * 304.8, 1)
-                    })
-                    .ToList(),
-                ReferencePlaneCreatedCount = referencePlaneCreatedCount,
+                CurtainGridLineCount = wall.CurtainGrid.GetUGridLineIds().Count + wall.CurtainGrid.GetVGridLineIds().Count,
+                CurtainGridLineReferenceCount = priorityZeroGridReferences.Count,
+                CurtainGridLineReferenceFailures = curtainGridLineReferenceFailures,
+                CurtainGridLineReferenceSamples = curtainGridLineReferenceSamples,
+                ReferencePlaneCreatedCount = referencePlaneIds.Count,
                 ReferencePlaneReferenceCount = referencePlaneReferenceCount,
                 ReferencePlaneIds = referencePlaneIds.Select(id => id.GetIdValue()).ToList(),
-                AttemptedDimensions = attempts.Select(ToCurtainElevationDimensionAttemptResult).ToList(),
+                BackgroundAttemptedDimensions = backgroundAttempts.Select(ToCurtainElevationDimensionAttemptResult).ToList(),
+                ActiveViewProfileAttempts = activeProfileAttempts.Select(ToCurtainElevationDimensionAttemptResult).ToList(),
+                AttemptedDimensions = backgroundAttempts.Concat(activeProfileAttempts).Select(ToCurtainElevationDimensionAttemptResult).ToList(),
                 CreatedDimensionIds = createdDimensionIds.Select(id => id.GetIdValue()).ToList(),
                 VerifiedDimensionIds = verifiedDimensionIds.Select(id => id.GetIdValue()).ToList(),
+                AssociationMoveTest = associationMoveTest,
                 Failures = failures,
                 Rollback = rollback
             };
         }
-
 
         private class CurtainElevationDimensionTypeResolution
         {
@@ -249,10 +429,15 @@ namespace RevitMCP.Core
 
         private class CurtainElevationDimensionResult
         {
+            public ElementId WallId { get; set; }
             public ElementId TotalWidthDimensionId { get; set; }
             public ElementId HorizontalGridDimensionId { get; set; }
             public ElementId TotalHeightDimensionId { get; set; }
             public ElementId VerticalGridDimensionId { get; set; }
+            public bool? TotalWidthDimensionAreReferencesAvailable { get; set; }
+            public bool? HorizontalGridDimensionAreReferencesAvailable { get; set; }
+            public bool? TotalHeightDimensionAreReferencesAvailable { get; set; }
+            public bool? VerticalGridDimensionAreReferencesAvailable { get; set; }
             public List<ElementId> ReferenceCurveIds { get; } = new List<ElementId>();
             public List<string> Warnings { get; } = new List<string>();
             public int GeometryReferenceCount { get; set; }
@@ -278,12 +463,26 @@ namespace RevitMCP.Core
             public int AttemptCount { get; set; }
             public int VerifiedCount { get; set; }
             public List<string> CreationErrors { get; } = new List<string>();
+            public List<object> PostCommitDimensionValidation { get; } = new List<object>();
+            public List<CurtainElevationPendingDimension> PendingNativeDimensions { get; } = new List<CurtainElevationPendingDimension>();
             public int CreatedCount { get; set; }
             public int FailedCount { get; set; }
             public string Status { get; set; } = "not_started";
+            public bool WasViewOpenBeforeDimensioning { get; set; }
+            public bool WasViewActiveBeforeDimensioning { get; set; }
+            public bool ViewActivationSucceeded { get; set; }
+            public string ViewActivationFailure { get; set; }
+            public int? GridReferencePriorityProfile { get; set; }
             public string Warning => string.Join(" ", Warnings.Where(w => !string.IsNullOrWhiteSpace(w)));
         }
 
+        private class CurtainElevationDimensionJob
+        {
+            public ViewSection View { get; set; }
+            public Wall Wall { get; set; }
+            public CurtainElevationCropResult CropResult { get; set; }
+            public CurtainElevationDimensionResult Result { get; set; }
+        }
         private class CurtainElevationGeometryReference
         {
             public Reference Reference { get; set; }
@@ -303,6 +502,26 @@ namespace RevitMCP.Core
             public ElementId CurtainGridLineId { get; set; }
             public string StableRepresentation { get; set; }
             public string GeometryObjectType { get; set; }
+            public string ReferenceSource { get; set; }
+            public int ReferencePriority { get; set; } = int.MaxValue;
+            public bool SelectedForDimension { get; set; }
+            public string SelectionReason { get; set; }
+        }
+
+        private class CurtainGridLineReferenceDiagnostic
+        {
+            public long GridLineId { get; set; }
+            public string ProjectedDirection { get; set; }
+            public string ReferenceSource { get; set; }
+            public string GeometryObjectType { get; set; }
+            public bool ReferenceAvailable { get; set; }
+            public string StableRepresentation { get; set; }
+            public double ProjectedCoordinateMm { get; set; }
+            public double LengthMm { get; set; }
+            public int ReferencePriority { get; set; }
+            public bool IsAligned { get; set; }
+            public bool PositionMatches { get; set; }
+            public bool CoversGridRange { get; set; }
             public bool SelectedForDimension { get; set; }
             public string SelectionReason { get; set; }
         }
@@ -318,7 +537,61 @@ namespace RevitMCP.Core
             public ElementId DimensionId { get; set; }
             public ElementId OwnerViewId { get; set; }
             public bool ExistsAfterCreate { get; set; }
+            public bool? PreCommitAreReferencesAvailable { get; set; }
+            public bool? PostCommitAreReferencesAvailable { get; set; }
+            public int ExpectedReferenceCount { get; set; }
+            public int? PostCommitReferenceCount { get; set; }
+            public bool? PostCommitValidationPassed { get; set; }
+            public string PostCommitFailureReason { get; set; }
             public string FailureMessage { get; set; }
+            public string ReferenceSource { get; set; }
+            public int? ReferencePriorityProfile { get; set; }
+            public List<IdType> InputReferenceElementIds { get; set; } = new List<IdType>();
+            public List<string> InputStableRepresentations { get; set; } = new List<string>();
+            public List<IdType> ExpectedCurtainGridLineIds { get; set; } = new List<IdType>();
+            public CurtainElevationDimensionReferenceState InactivePostCommitState { get; set; }
+            public CurtainElevationDimensionReferenceState AfterViewActivationState { get; set; }
+            public CurtainElevationDimensionReferenceState ActivePostCommitState { get; set; }
+        }
+
+        private class CurtainElevationDimensionReferenceState
+        {
+            public string Phase { get; set; }
+            public bool WasViewOpen { get; set; }
+            public bool WasViewActive { get; set; }
+            public bool DimensionExists { get; set; }
+            public IdType? OwnerViewId { get; set; }
+            public bool? AreReferencesAvailable { get; set; }
+            public int? ReferenceCount { get; set; }
+            public List<IdType> ReferenceElementIds { get; set; } = new List<IdType>();
+            public List<string> StableRepresentations { get; set; } = new List<string>();
+            public bool StableRepresentationRoundTripPassed { get; set; }
+            public bool InputStableRepresentationRoundTripPassed { get; set; }
+            public bool ReferencesMatchExpectedCurtainGridLines { get; set; }
+            public bool ValidationPassed { get; set; }
+            public string FailureReason { get; set; }
+        }
+
+        private class CurtainElevationPendingDimension
+        {
+            public string Kind { get; set; }
+            public View View { get; set; }
+            public Transform Frame { get; set; }
+            public DimensionType DimensionType { get; set; }
+            public string Axis { get; set; }
+            public List<double> Coordinates { get; set; } = new List<double>();
+            public double MinOther { get; set; }
+            public double MaxOther { get; set; }
+            public double DimensionLineOffset { get; set; }
+            public bool AllowDetailCurveFallback { get; set; }
+            public ElementId NativeDimensionId { get; set; }
+            public int ExpectedReferenceCount { get; set; }
+            public string NativeReferenceSource { get; set; }
+            public bool? PreCommitAreReferencesAvailable { get; set; }
+            public bool? PostCommitAreReferencesAvailable { get; set; }
+            public int? PostCommitReferenceCount { get; set; }
+            public bool PostCommitValidationPassed { get; set; }
+            public string PostCommitFailureReason { get; set; }
         }
 
 
@@ -415,9 +688,15 @@ namespace RevitMCP.Core
             DimensionType dimensionType,
             bool addDimensions,
             double fallbackInnerOffsetFt,
-            double fallbackStackOffsetFt)
+            double fallbackStackOffsetFt,
+            CurtainElevationDimensionResult existingResult = null,
+            int? preferredGridReferencePriority = null,
+            bool allowGridDetailCurveFallback = true)
         {
-            var result = new CurtainElevationDimensionResult();
+            CurtainElevationDimensionResult result = existingResult ?? new CurtainElevationDimensionResult();
+            result.GridReferencePriorityProfile = preferredGridReferencePriority;
+            if (wall != null)
+                result.WallId = wall.Id;
             if (!addDimensions)
             {
                 result.Status = "disabled";
@@ -485,24 +764,23 @@ namespace RevitMCP.Core
             double leftTotalX = leftGridX - stackOffsetResolution.ResolvedOffsetFt;
             List<CurtainElevationGeometryReference> geometryReferences = CollectCurtainElevationGeometryReferences(doc, wall, view, frame, minX, maxX, minY, maxY);
             List<CurtainElevationGeometryReference> horizontalBoundaryReferences = CollectCurtainElevationGeometryReferences(doc, wall, view, frame, minX, maxX, minY, maxY, true);
-            List<CurtainElevationGeometryReference> gridLineReferences = CollectCurtainElevationGridLineReferences(doc, wall, view, frame, minX, maxX, minY, maxY);
+            List<CurtainElevationGeometryReference> gridLineReferences = CollectCurtainElevationGridLineReferences(
+                doc,
+                wall,
+                view,
+                frame,
+                minX,
+                maxX,
+                minY,
+                maxY,
+                result.CurtainGridLineReferenceFailures,
+                result.CurtainGridLineReferenceSamples,
+                preferredGridReferencePriority);
             result.GeometryReferenceCount = horizontalBoundaryReferences.Count + gridLineReferences.Count;
             result.CurtainGridLineCount = wall.CurtainGrid.GetUGridLineIds().Count + wall.CurtainGrid.GetVGridLineIds().Count;
             result.CurtainGridLineReferenceCount = gridLineReferences.Count;
             if (result.CurtainGridLineReferenceCount < result.CurtainGridLineCount)
                 result.CurtainGridLineReferenceFailures.Add($"Only {result.CurtainGridLineReferenceCount} of {result.CurtainGridLineCount} CurtainGridLine elements exposed a usable aligned geometry reference.");
-            result.CurtainGridLineReferenceSamples.AddRange(gridLineReferences.Select(r => (object)new
-            {
-                GridLineId = r.CurtainGridLineId?.GetIdValue(),
-                GridLineOrientation = r.IsVertical ? "vertical" : (r.IsHorizontal ? "horizontal" : "other"),
-                GeometryObjectType = r.GeometryObjectType,
-                ReferenceAvailable = r.Reference != null,
-                StableRepresentation = r.StableRepresentation,
-                ProjectedCoordinate = Math.Round((r.IsVertical ? r.CenterX : r.CenterY) * 304.8, 1),
-                LengthMm = Math.Round(r.Length * 304.8, 1),
-                SelectedForDimension = r.SelectedForDimension,
-                SelectionReason = r.SelectionReason
-            }));
             result.GeometryReferenceCategories = horizontalBoundaryReferences
                 .Select(r => r.CategoryName)
                 .Where(s => !string.IsNullOrWhiteSpace(s))
@@ -511,9 +789,10 @@ namespace RevitMCP.Core
                 .ToList();
 
             List<CurtainElevationGeometryReference> totalWidthRefs = SelectCurtainElevationBoundaryReferences(horizontalBoundaryReferences, "horizontal", minX, maxX, minY, maxY, 1.0 / 304.8);
-            if (TryCreateCurtainElevationDimensionChain(doc, view, frame, dimensionType, "horizontal", new List<double> { minX, maxX }, totalWidthRefs, minY, maxY, topTotalY, result, true, out ElementId totalWidthId, out string totalWidthSource, out string totalWidthReason))
+            if (TryCreateCurtainElevationDimensionChain(doc, view, frame, dimensionType, "total_width", "horizontal", new List<double> { minX, maxX }, totalWidthRefs, minY, maxY, topTotalY, result, true, out ElementId totalWidthId, out string totalWidthSource, out string totalWidthReason))
             {
                 result.TotalWidthDimensionId = totalWidthId;
+                result.TotalWidthDimensionAreReferencesAvailable = GetCurtainElevationDimensionReferencesAvailability(doc, totalWidthId);
                 result.TotalWidthDimensionReferenceSource = totalWidthRefs.Any(reference => reference.ElementId == wall.Id)
                     ? "host_wall_geometry_reference"
                     : totalWidthSource;
@@ -527,9 +806,10 @@ namespace RevitMCP.Core
             }
 
             List<CurtainElevationGeometryReference> totalHeightRefs = SelectCurtainElevationBoundaryReferences(geometryReferences, "vertical", minX, maxX, minY, maxY);
-            if (TryCreateCurtainElevationDimensionChain(doc, view, frame, dimensionType, "vertical", new List<double> { minY, maxY }, totalHeightRefs, minX, maxX, leftTotalX, result, false, out ElementId totalHeightId, out string totalHeightSource, out string totalHeightReason))
+            if (TryCreateCurtainElevationDimensionChain(doc, view, frame, dimensionType, "total_height", "vertical", new List<double> { minY, maxY }, totalHeightRefs, minX, maxX, leftTotalX, result, false, out ElementId totalHeightId, out string totalHeightSource, out string totalHeightReason))
             {
                 result.TotalHeightDimensionId = totalHeightId;
+                result.TotalHeightDimensionAreReferencesAvailable = GetCurtainElevationDimensionReferencesAvailability(doc, totalHeightId);
                 result.TotalHeightDimensionReferenceSource = totalHeightSource;
                 result.CreatedCount++;
             }
@@ -544,9 +824,10 @@ namespace RevitMCP.Core
             if (verticalGridXs.Count >= 3)
             {
                 List<CurtainElevationGeometryReference> verticalGridRefs = SelectCurtainElevationGridDimensionReferences(horizontalBoundaryReferences, gridLineReferences, "horizontal", verticalGridXs);
-                if (TryCreateCurtainElevationDimensionChain(doc, view, frame, dimensionType, "horizontal", verticalGridXs, verticalGridRefs, minY, maxY, topGridY, result, true, out ElementId horizontalGridId, out string horizontalGridSource, out string horizontalGridReason))
+                if (TryCreateCurtainElevationDimensionChain(doc, view, frame, dimensionType, "horizontal_grid", "horizontal", verticalGridXs, verticalGridRefs, minY, maxY, topGridY, result, allowGridDetailCurveFallback, out ElementId horizontalGridId, out string horizontalGridSource, out string horizontalGridReason))
                 {
                     result.HorizontalGridDimensionId = horizontalGridId;
+                    result.HorizontalGridDimensionAreReferencesAvailable = GetCurtainElevationDimensionReferencesAvailability(doc, horizontalGridId);
                     result.HorizontalGridDimensionReferenceSource = horizontalGridSource;
                     result.CreatedCount++;
                 }
@@ -567,9 +848,10 @@ namespace RevitMCP.Core
             if (horizontalGridYs.Count >= 3)
             {
                 List<CurtainElevationGeometryReference> horizontalGridRefs = SelectCurtainElevationGridDimensionReferences(geometryReferences, gridLineReferences, "vertical", horizontalGridYs);
-                if (TryCreateCurtainElevationDimensionChain(doc, view, frame, dimensionType, "vertical", horizontalGridYs, horizontalGridRefs, minX, maxX, leftGridX, result, true, out ElementId verticalGridId, out string verticalGridSource, out string verticalGridReason))
+                if (TryCreateCurtainElevationDimensionChain(doc, view, frame, dimensionType, "vertical_grid", "vertical", horizontalGridYs, horizontalGridRefs, minX, maxX, leftGridX, result, allowGridDetailCurveFallback, out ElementId verticalGridId, out string verticalGridSource, out string verticalGridReason))
                 {
                     result.VerticalGridDimensionId = verticalGridId;
+                    result.VerticalGridDimensionAreReferencesAvailable = GetCurtainElevationDimensionReferencesAvailability(doc, verticalGridId);
                     result.VerticalGridDimensionReferenceSource = verticalGridSource;
                     result.CreatedCount++;
                 }
@@ -593,6 +875,44 @@ namespace RevitMCP.Core
             return result;
         }
 
+        private bool CurtainElevationGridDimensionsUseNativeReferences(CurtainElevationDimensionResult result)
+        {
+            if (result == null)
+                return false;
+
+            return IsCurtainElevationNativeOrSkippedGridSource(result.HorizontalGridDimensionReferenceSource) &&
+                IsCurtainElevationNativeOrSkippedGridSource(result.VerticalGridDimensionReferenceSource);
+        }
+
+        private bool IsCurtainElevationNativeOrSkippedGridSource(string source)
+        {
+            return source == "skipped" ||
+                source == "curtain_grid_internal_geometry_reference" ||
+                source == "curtain_grid_curve_reference";
+        }
+
+        private void DeleteCurtainElevationDimensionArtifacts(Document doc, CurtainElevationDimensionResult result)
+        {
+            if (doc == null || result == null)
+                return;
+
+            var ids = new List<ElementId>
+            {
+                result.TotalWidthDimensionId,
+                result.TotalHeightDimensionId,
+                result.HorizontalGridDimensionId,
+                result.VerticalGridDimensionId
+            };
+            ids.AddRange(result.ReferenceCurveIds);
+
+            foreach (ElementId id in ids
+                .Where(id => id != null && id != ElementId.InvalidElementId)
+                .Distinct())
+            {
+                if (doc.GetElement(id) != null)
+                    doc.Delete(id);
+            }
+        }
         private CurtainElevationDimensionStackOffsetResolution ResolveCurtainElevationDimensionStackOffset(
             DimensionType dimensionType,
             int viewScale,
@@ -724,6 +1044,223 @@ namespace RevitMCP.Core
             }
         }
 
+
+        private void FinalizeCurtainElevationDimensionsAfterCommit(
+            Document doc,
+            IEnumerable<CurtainElevationDimensionResult> dimensionResults)
+        {
+            List<CurtainElevationDimensionResult> results = dimensionResults?
+                .Where(result => result != null)
+                .ToList() ?? new List<CurtainElevationDimensionResult>();
+            var invalidDimensions = new List<(CurtainElevationDimensionResult Result, CurtainElevationPendingDimension Pending)>();
+
+            foreach (CurtainElevationDimensionResult result in results)
+            {
+                foreach (CurtainElevationPendingDimension pending in result.PendingNativeDimensions)
+                {
+                    Dimension dimension = null;
+                    string failureReason = null;
+                    int? referenceCount = null;
+                    bool? referencesAvailable = null;
+
+                    try
+                    {
+                        dimension = doc.GetElement(pending.NativeDimensionId) as Dimension;
+                        if (dimension == null)
+                        {
+                            failureReason = "Dimension does not exist after commit.";
+                        }
+                        else if (dimension.OwnerViewId != pending.View.Id)
+                        {
+                            failureReason = $"OwnerViewId is {dimension.OwnerViewId.GetIdValue()}, expected {pending.View.Id.GetIdValue()}.";
+                        }
+                        else
+                        {
+                            referencesAvailable = dimension.AreReferencesAvailable;
+                            referenceCount = dimension.References?.Size ?? 0;
+                            if (referencesAvailable != true)
+                                failureReason = "AreReferencesAvailable is not true after commit in the active owner view.";
+                            else if (referenceCount != pending.ExpectedReferenceCount)
+                                failureReason = $"Reference count is {referenceCount ?? 0}, expected {pending.ExpectedReferenceCount}.";
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        failureReason = "Post-commit validation threw: " + ex.Message;
+                    }
+
+                    pending.PostCommitAreReferencesAvailable = referencesAvailable;
+                    pending.PostCommitReferenceCount = referenceCount;
+                    pending.PostCommitValidationPassed = string.IsNullOrWhiteSpace(failureReason);
+                    pending.PostCommitFailureReason = failureReason;
+                    result.PostCommitDimensionValidation.Add(new
+                    {
+                        WallId = result.WallId?.GetIdValue(),
+                        ViewId = pending.View?.Id.GetIdValue(),
+                        DimensionKind = pending.Kind,
+                        DimensionId = pending.NativeDimensionId?.GetIdValue(),
+                        PreCommitAreReferencesAvailable = pending.PreCommitAreReferencesAvailable,
+                        PostCommitAreReferencesAvailable = pending.PostCommitAreReferencesAvailable,
+                        ExpectedReferenceCount = pending.ExpectedReferenceCount,
+                        PostCommitReferenceCount = pending.PostCommitReferenceCount,
+                        PostCommitValidationPassed = pending.PostCommitValidationPassed,
+                        PostCommitFailureReason = pending.PostCommitFailureReason,
+                        NativeReferenceSource = GetCurtainElevationDimensionReferenceSource(result, pending.Kind)
+                    });
+
+                    if (pending.PostCommitValidationPassed)
+                    {
+                        SetCurtainElevationDimensionAvailability(result, pending.Kind, true);
+                    }
+                    else
+                    {
+                        invalidDimensions.Add((result, pending));
+                    }
+                }
+            }
+
+            if (invalidDimensions.Count > 0)
+            {
+                using (Transaction repair = TransactionHelper.Begin(doc, "修復無效帷幕牆立面尺寸"))
+                {
+                    repair.Start();
+                    foreach (var item in invalidDimensions)
+                    {
+                        CurtainElevationDimensionResult result = item.Result;
+                        CurtainElevationPendingDimension pending = item.Pending;
+                        try
+                        {
+                            if (pending.NativeDimensionId != null &&
+                                pending.NativeDimensionId != ElementId.InvalidElementId &&
+                                doc.GetElement(pending.NativeDimensionId) != null)
+                            {
+                                doc.Delete(pending.NativeDimensionId);
+                            }
+
+                            string failurePrefix = $"{pending.Kind} native dimension failed post-commit validation: {pending.PostCommitFailureReason}";
+                            result.DimensionFallbackReason = AppendCurtainElevationWarning(result.DimensionFallbackReason, failurePrefix);
+                            string fallbackReason = null;
+                            if (pending.AllowDetailCurveFallback &&
+                                TryCreateCurtainElevationDetailCurveFallbackDimension(
+                                    doc,
+                                    pending.View,
+                                    pending.Frame,
+                                    pending.DimensionType,
+                                    pending.Axis,
+                                    pending.Coordinates,
+                                    pending.MinOther,
+                                    pending.MaxOther,
+                                    pending.DimensionLineOffset,
+                                    result,
+                                    out ElementId fallbackDimensionId,
+                                    out fallbackReason))
+                            {
+                                string fallbackSource = pending.Kind == "total_width"
+                                    ? "detail_curve_fallback_from_wall_boundary_coordinates"
+                                    : "detail_curve_fallback_from_curtain_grid_coordinates";
+                                SetCurtainElevationDimensionResult(result, pending.Kind, fallbackDimensionId, fallbackSource, null);
+                            }
+                            else
+                            {
+                                string fallbackFailure = pending.AllowDetailCurveFallback
+                                    ? "detail curve fallback failed: " + (fallbackReason ?? "unknown reason")
+                                    : "detail curve fallback is disabled for this dimension.";
+                                SetCurtainElevationDimensionResult(result, pending.Kind, null, "failed", false);
+                                result.CreatedCount = Math.Max(0, result.CreatedCount - 1);
+                                result.FailedCount++;
+                                result.Warnings.Add(failurePrefix + " " + fallbackFailure);
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            SetCurtainElevationDimensionResult(result, pending.Kind, null, "failed", false);
+                            result.CreatedCount = Math.Max(0, result.CreatedCount - 1);
+                            result.FailedCount++;
+                            result.Warnings.Add($"{pending.Kind} post-commit repair failed: {ex.Message}");
+                        }
+                    }
+
+                    repair.Commit();
+                }
+
+                foreach (var item in invalidDimensions)
+                {
+                    ElementId finalDimensionId = GetCurtainElevationDimensionId(item.Result, item.Pending.Kind);
+                    if (finalDimensionId != null && finalDimensionId != ElementId.InvalidElementId)
+                    {
+                        SetCurtainElevationDimensionAvailability(
+                            item.Result,
+                            item.Pending.Kind,
+                            GetCurtainElevationDimensionReferencesAvailability(doc, finalDimensionId));
+                    }
+                }
+            }
+
+            foreach (CurtainElevationDimensionResult result in results)
+            {
+                result.AttemptCount = result.CreatedCount + result.FailedCount;
+                result.Status = result.CreatedCount > 0
+                    ? (result.FailedCount > 0 ? "partial" : "created")
+                    : "failed";
+            }
+        }
+
+        private ElementId GetCurtainElevationDimensionId(CurtainElevationDimensionResult result, string kind)
+        {
+            if (kind == "total_width") return result.TotalWidthDimensionId;
+            if (kind == "total_height") return result.TotalHeightDimensionId;
+            if (kind == "horizontal_grid") return result.HorizontalGridDimensionId;
+            if (kind == "vertical_grid") return result.VerticalGridDimensionId;
+            return null;
+        }
+
+        private string GetCurtainElevationDimensionReferenceSource(CurtainElevationDimensionResult result, string kind)
+        {
+            if (kind == "total_width") return result.TotalWidthDimensionReferenceSource;
+            if (kind == "total_height") return result.TotalHeightDimensionReferenceSource;
+            if (kind == "horizontal_grid") return result.HorizontalGridDimensionReferenceSource;
+            if (kind == "vertical_grid") return result.VerticalGridDimensionReferenceSource;
+            return null;
+        }
+
+        private void SetCurtainElevationDimensionAvailability(CurtainElevationDimensionResult result, string kind, bool? available)
+        {
+            if (kind == "total_width") result.TotalWidthDimensionAreReferencesAvailable = available;
+            else if (kind == "total_height") result.TotalHeightDimensionAreReferencesAvailable = available;
+            else if (kind == "horizontal_grid") result.HorizontalGridDimensionAreReferencesAvailable = available;
+            else if (kind == "vertical_grid") result.VerticalGridDimensionAreReferencesAvailable = available;
+        }
+
+        private void SetCurtainElevationDimensionResult(
+            CurtainElevationDimensionResult result,
+            string kind,
+            ElementId dimensionId,
+            string referenceSource,
+            bool? available)
+        {
+            if (kind == "total_width")
+            {
+                result.TotalWidthDimensionId = dimensionId;
+                result.TotalWidthDimensionReferenceSource = referenceSource;
+            }
+            else if (kind == "total_height")
+            {
+                result.TotalHeightDimensionId = dimensionId;
+                result.TotalHeightDimensionReferenceSource = referenceSource;
+            }
+            else if (kind == "horizontal_grid")
+            {
+                result.HorizontalGridDimensionId = dimensionId;
+                result.HorizontalGridDimensionReferenceSource = referenceSource;
+            }
+            else if (kind == "vertical_grid")
+            {
+                result.VerticalGridDimensionId = dimensionId;
+                result.VerticalGridDimensionReferenceSource = referenceSource;
+            }
+
+            SetCurtainElevationDimensionAvailability(result, kind, available);
+        }
         private CurtainElevationDimensionAttempt TryDiagnoseCurtainGeometryDimension(
             Document doc,
             View view,
@@ -740,7 +1277,26 @@ namespace RevitMCP.Core
             {
                 Name = name,
                 Method = "geometry_reference",
-                ReferenceCount = geometryReferences?.Count ?? 0
+                ReferenceCount = geometryReferences?.Count ?? 0,
+                ExpectedReferenceCount = distinct.Count,
+                ReferenceSource = ResolveCurtainElevationDimensionReferenceSource(geometryReferences),
+                ReferencePriorityProfile = geometryReferences?
+                    .Where(reference => reference?.CurtainGridLineId != null)
+                    .Select(reference => (int?)reference.ReferencePriority)
+                    .FirstOrDefault(),
+                InputReferenceElementIds = geometryReferences?
+                    .Where(reference => reference?.ElementId != null)
+                    .Select(reference => reference.ElementId.GetIdValue())
+                    .ToList() ?? new List<IdType>(),
+                InputStableRepresentations = geometryReferences?
+                    .Where(reference => !string.IsNullOrWhiteSpace(reference?.StableRepresentation))
+                    .Select(reference => reference.StableRepresentation)
+                    .ToList() ?? new List<string>(),
+                ExpectedCurtainGridLineIds = geometryReferences?
+                    .Where(reference => reference?.CurtainGridLineId != null)
+                    .Select(reference => reference.CurtainGridLineId.GetIdValue())
+                    .Distinct()
+                    .ToList() ?? new List<IdType>()
             };
 
             try
@@ -762,7 +1318,7 @@ namespace RevitMCP.Core
                     attempt.DimensionLineEnd = CurtainElevationPointAt2D(frame, dimensionLineOffset, distinct.Last());
                 }
 
-                if (geometryReferences == null || geometryReferences.Count < distinct.Count)
+                if (geometryReferences == null || geometryReferences.Count != distinct.Count)
                 {
                     attempt.FailureMessage = $"not enough geometry references. Need {distinct.Count}, got {geometryReferences?.Count ?? 0}.";
                     return attempt;
@@ -791,8 +1347,17 @@ namespace RevitMCP.Core
                 }
 
                 ApplyDimensionType(dimension, dimensionType);
+                doc.Regenerate();
                 attempt.DimensionId = dimension.Id;
                 attempt.OwnerViewId = dimension.OwnerViewId;
+                try
+                {
+                    attempt.PreCommitAreReferencesAvailable = dimension.AreReferencesAvailable;
+                }
+                catch
+                {
+                    attempt.PreCommitAreReferencesAvailable = null;
+                }
                 attempt.Success = true;
                 return attempt;
             }
@@ -822,7 +1387,8 @@ namespace RevitMCP.Core
             var attempt = new CurtainElevationDimensionAttempt
             {
                 Name = name,
-                Method = "reference_plane_fallback"
+                Method = "reference_plane_fallback",
+                ExpectedReferenceCount = distinct.Count
             };
 
             try
@@ -896,8 +1462,17 @@ namespace RevitMCP.Core
                 }
 
                 ApplyDimensionType(dimension, dimensionType);
+                doc.Regenerate();
                 attempt.DimensionId = dimension.Id;
                 attempt.OwnerViewId = dimension.OwnerViewId;
+                try
+                {
+                    attempt.PreCommitAreReferencesAvailable = dimension.AreReferencesAvailable;
+                }
+                catch
+                {
+                    attempt.PreCommitAreReferencesAvailable = null;
+                }
                 attempt.Success = true;
                 return attempt;
             }
@@ -909,6 +1484,140 @@ namespace RevitMCP.Core
             }
         }
 
+        private List<double> GetCurtainElevationDimensionValuesMm(Dimension dimension)
+        {
+            var values = new List<double>();
+            if (dimension == null)
+                return values;
+
+            try
+            {
+                if (dimension.NumberOfSegments > 0 && dimension.Segments != null)
+                {
+                    foreach (DimensionSegment segment in dimension.Segments)
+                        values.Add(Math.Round(Convert.ToDouble(segment.Value) * 304.8, 4));
+                }
+                else if (dimension.Value.HasValue)
+                {
+                    values.Add(Math.Round(dimension.Value.Value * 304.8, 4));
+                }
+            }
+            catch
+            {
+                // Dimension values are best-effort diagnostics only.
+            }
+            return values;
+        }
+        private CurtainElevationDimensionReferenceState CaptureCurtainElevationDimensionReferenceState(
+            Document doc,
+            View view,
+            CurtainElevationDimensionAttempt attempt,
+            string phase,
+            bool wasViewOpen,
+            bool wasViewActive,
+            bool updateCanonicalValidation)
+        {
+            var state = new CurtainElevationDimensionReferenceState
+            {
+                Phase = phase,
+                WasViewOpen = wasViewOpen,
+                WasViewActive = wasViewActive
+            };
+
+            try
+            {
+                Dimension dimension = attempt?.DimensionId != null
+                    ? doc.GetElement(attempt.DimensionId) as Dimension
+                    : null;
+                state.DimensionExists = dimension != null;
+                state.OwnerViewId = dimension?.OwnerViewId.GetIdValue();
+                if (dimension == null)
+                {
+                    state.FailureReason = "Dimension does not exist after commit.";
+                }
+                else
+                {
+                    state.AreReferencesAvailable = dimension.AreReferencesAvailable;
+                    state.ReferenceCount = dimension.References?.Size ?? 0;
+                    if (dimension.References != null)
+                    {
+                        foreach (Reference reference in dimension.References)
+                        {
+                            if (reference == null)
+                                continue;
+
+                            state.ReferenceElementIds.Add(reference.ElementId.GetIdValue());
+                            try
+                            {
+                                string stable = reference.ConvertToStableRepresentation(doc);
+                                state.StableRepresentations.Add(stable);
+                            }
+                            catch
+                            {
+                                state.StableRepresentations.Add(null);
+                            }
+                        }
+                    }
+
+                    if (dimension.OwnerViewId != view.Id)
+                        state.FailureReason = $"OwnerViewId is {dimension.OwnerViewId.GetIdValue()}, expected {view.Id.GetIdValue()}.";
+                    else if (state.AreReferencesAvailable != true)
+                        state.FailureReason = "AreReferencesAvailable is not true.";
+                    else if (state.ReferenceCount != attempt.ExpectedReferenceCount)
+                        state.FailureReason = $"Reference count is {state.ReferenceCount ?? 0}, expected {attempt.ExpectedReferenceCount}.";
+                }
+
+                state.StableRepresentationRoundTripPassed = state.StableRepresentations.Count > 0 &&
+                    state.StableRepresentations.All(stable =>
+                    {
+                        if (string.IsNullOrWhiteSpace(stable))
+                            return false;
+                        try
+                        {
+                            Reference parsed = Reference.ParseFromStableRepresentation(doc, stable);
+                            return parsed != null && state.ReferenceElementIds.Contains(parsed.ElementId.GetIdValue());
+                        }
+                        catch
+                        {
+                            return false;
+                        }
+                    });
+                state.InputStableRepresentationRoundTripPassed = attempt?.InputStableRepresentations?.Count > 0 &&
+                    attempt.InputStableRepresentations.All(stable =>
+                    {
+                        try { return Reference.ParseFromStableRepresentation(doc, stable) != null; }
+                        catch { return false; }
+                    });
+                state.ReferencesMatchExpectedCurtainGridLines = attempt?.ExpectedCurtainGridLineIds == null ||
+                    attempt.ExpectedCurtainGridLineIds.Count == 0 ||
+                    attempt.ExpectedCurtainGridLineIds.All(id => state.ReferenceElementIds.Contains(id));
+                if (string.IsNullOrWhiteSpace(state.FailureReason) && !state.StableRepresentationRoundTripPassed)
+                    state.FailureReason = "Readback stable representation parse round-trip failed.";
+                if (string.IsNullOrWhiteSpace(state.FailureReason) && !state.InputStableRepresentationRoundTripPassed)
+                    state.FailureReason = "Input stable representation parse round-trip failed.";
+                if (string.IsNullOrWhiteSpace(state.FailureReason) && !state.ReferencesMatchExpectedCurtainGridLines)
+                    state.FailureReason = "Readback references do not map to the expected CurtainGridLine element ids.";
+            }
+            catch (Exception ex)
+            {
+                state.FailureReason = "Reference state readback threw: " + ex.Message;
+            }
+
+            state.ValidationPassed = string.IsNullOrWhiteSpace(state.FailureReason);
+            if (updateCanonicalValidation && attempt != null)
+            {
+                attempt.ExistsAfterCreate = state.DimensionExists;
+                attempt.OwnerViewId = state.OwnerViewId.HasValue ? new ElementId(state.OwnerViewId.Value) : null;
+                attempt.PostCommitAreReferencesAvailable = state.AreReferencesAvailable;
+                attempt.PostCommitReferenceCount = state.ReferenceCount;
+                attempt.PostCommitValidationPassed = state.ValidationPassed;
+                attempt.PostCommitFailureReason = state.FailureReason;
+                if (!state.ValidationPassed)
+                    attempt.FailureMessage = AppendCurtainElevationWarning(attempt.FailureMessage, state.FailureReason);
+            }
+
+            return state;
+        }
         private object ToCurtainElevationDimensionAttemptResult(CurtainElevationDimensionAttempt attempt)
         {
             if (attempt == null)
@@ -925,6 +1634,20 @@ namespace RevitMCP.Core
                 DimensionId = attempt.DimensionId?.GetIdValue(),
                 OwnerViewId = attempt.OwnerViewId?.GetIdValue(),
                 ExistsAfterCreate = attempt.ExistsAfterCreate,
+                PreCommitAreReferencesAvailable = attempt.PreCommitAreReferencesAvailable,
+                PostCommitAreReferencesAvailable = attempt.PostCommitAreReferencesAvailable,
+                ExpectedReferenceCount = attempt.ExpectedReferenceCount,
+                PostCommitReferenceCount = attempt.PostCommitReferenceCount,
+                PostCommitValidationPassed = attempt.PostCommitValidationPassed,
+                PostCommitFailureReason = attempt.PostCommitFailureReason,
+                ReferenceSource = attempt.ReferenceSource,
+                ReferencePriorityProfile = attempt.ReferencePriorityProfile,
+                InputReferenceElementIds = attempt.InputReferenceElementIds,
+                InputStableRepresentations = attempt.InputStableRepresentations,
+                ExpectedCurtainGridLineIds = attempt.ExpectedCurtainGridLineIds,
+                InactivePostCommitState = attempt.InactivePostCommitState,
+                AfterViewActivationState = attempt.AfterViewActivationState,
+                ActivePostCommitState = attempt.ActivePostCommitState,
                 FailureMessage = attempt.FailureMessage
             };
         }
@@ -934,6 +1657,7 @@ namespace RevitMCP.Core
             View view,
             Transform frame,
             DimensionType dimensionType,
+            string kind,
             string axis,
             List<double> coordinates,
             List<CurtainElevationGeometryReference> geometryReferences,
@@ -970,9 +1694,27 @@ namespace RevitMCP.Core
                     geometryReferences,
                     dimensionLineOffset,
                     out dimensionId,
+                    out bool? preCommitAreReferencesAvailable,
                     out string geometryReason))
                 {
-                    referenceSource = "geometry_reference";
+                    referenceSource = ResolveCurtainElevationDimensionReferenceSource(geometryReferences);
+                    aggregate.PendingNativeDimensions.Add(new CurtainElevationPendingDimension
+                    {
+                        Kind = kind,
+                        View = view,
+                        Frame = frame,
+                        DimensionType = dimensionType,
+                        Axis = axis,
+                        Coordinates = distinct.ToList(),
+                        MinOther = minOther,
+                        MaxOther = maxOther,
+                        DimensionLineOffset = dimensionLineOffset,
+                        AllowDetailCurveFallback = allowDetailCurveFallback,
+                        NativeDimensionId = dimensionId,
+                        ExpectedReferenceCount = distinct.Count,
+                        NativeReferenceSource = referenceSource,
+                        PreCommitAreReferencesAvailable = preCommitAreReferencesAvailable
+                    });
                     return true;
                 }
 
@@ -1021,6 +1763,44 @@ namespace RevitMCP.Core
                 reason = ex.Message;
                 referenceSource = "failed";
                 return false;
+            }
+        }
+
+        private string ResolveCurtainElevationDimensionReferenceSource(
+            IEnumerable<CurtainElevationGeometryReference> geometryReferences)
+        {
+            List<CurtainElevationGeometryReference> references = geometryReferences?
+                .Where(reference => reference != null)
+                .ToList() ?? new List<CurtainElevationGeometryReference>();
+
+            if (references.Any(reference =>
+                reference.ReferenceSource == "curtain_grid_internal_geometry_reference"))
+            {
+                return "curtain_grid_internal_geometry_reference";
+            }
+
+            if (references.Any(reference =>
+                reference.CurtainGridLineId != null ||
+                reference.ReferenceSource == "curtain_grid_curve_reference"))
+            {
+                return "curtain_grid_curve_reference";
+            }
+
+            return "geometry_reference";
+        }
+
+        private bool? GetCurtainElevationDimensionReferencesAvailability(Document doc, ElementId dimensionId)
+        {
+            if (doc == null || dimensionId == null || dimensionId == ElementId.InvalidElementId)
+                return null;
+
+            try
+            {
+                return (doc.GetElement(dimensionId) as Dimension)?.AreReferencesAvailable;
+            }
+            catch
+            {
+                return null;
             }
         }
 
@@ -1258,16 +2038,19 @@ namespace RevitMCP.Core
             List<CurtainElevationGeometryReference> geometryReferences,
             double dimensionLineOffset,
             out ElementId dimensionId,
+            out bool? preCommitAreReferencesAvailable,
             out string reason)
         {
             dimensionId = null;
+            preCommitAreReferencesAvailable = null;
             reason = null;
+            ElementId createdDimensionId = null;
 
             try
             {
-                if (geometryReferences == null || geometryReferences.Count < coordinates.Count)
+                if (geometryReferences == null || geometryReferences.Count != coordinates.Count)
                 {
-                    reason = $"not enough geometry references. Need {coordinates.Count}, got {geometryReferences?.Count ?? 0}.";
+                    reason = $"geometry reference count mismatch. Expected {coordinates.Count}, got {geometryReferences?.Count ?? 0}.";
                     return false;
                 }
 
@@ -1304,13 +2087,47 @@ namespace RevitMCP.Core
                     return false;
                 }
 
+                createdDimensionId = dimension.Id;
                 ApplyDimensionType(dimension, dimensionType);
+                doc.Regenerate();
+
+                Dimension persistedDimension = doc.GetElement(createdDimensionId) as Dimension;
+                if (persistedDimension == null)
+                    throw new InvalidOperationException("Dimension was created but could not be read back.");
+                if (persistedDimension.OwnerViewId != view.Id)
+                    throw new InvalidOperationException($"Dimension owner view is {persistedDimension.OwnerViewId.GetIdValue()}, expected {view.Id.GetIdValue()}.");
+                try
+                {
+                    preCommitAreReferencesAvailable = persistedDimension.AreReferencesAvailable;
+                }
+                catch
+                {
+                    preCommitAreReferencesAvailable = null;
+                }
+                if (persistedDimension.References == null || persistedDimension.References.Size != coordinates.Count)
+                    throw new InvalidOperationException($"Dimension reference count is {persistedDimension.References?.Size ?? 0}, expected {coordinates.Count}.");
+
                 LastCurtainElevationDimensionTypeId = dimensionType.Id.GetIdValue();
-                dimensionId = dimension.Id;
+                dimensionId = createdDimensionId;
                 return true;
             }
             catch (Exception ex)
             {
+                try
+                {
+                    if (createdDimensionId != null &&
+                        createdDimensionId != ElementId.InvalidElementId &&
+                        doc.GetElement(createdDimensionId) != null)
+                    {
+                        doc.Delete(createdDimensionId);
+                        doc.Regenerate();
+                    }
+                }
+                catch
+                {
+                    // Best-effort cleanup; preserve the original dimension validation failure.
+                }
+
                 reason = ex.Message;
                 return false;
             }
@@ -1708,7 +2525,10 @@ namespace RevitMCP.Core
             double minX,
             double maxX,
             double minY,
-            double maxY)
+            double maxY,
+            List<string> failures,
+            List<object> diagnostics,
+            int? preferredReferencePriority = null)
         {
             var selected = new List<CurtainElevationGeometryReference>();
             CurtainGrid grid = wall?.CurtainGrid;
@@ -1720,7 +2540,7 @@ namespace RevitMCP.Core
             var options = new Options
             {
                 ComputeReferences = true,
-                IncludeNonVisibleObjects = false,
+                IncludeNonVisibleObjects = true,
                 DetailLevel = ViewDetailLevel.Fine
             };
 
@@ -1749,60 +2569,169 @@ namespace RevitMCP.Core
                     if (fullDirection.GetLength() < tolerance)
                         continue;
                     fullDirection = fullDirection.Normalize();
+                    bool gridIsVertical = Math.Abs(fullDirection.Y) >= Math.Abs(fullDirection.X);
+                    double fullCoordinate = gridIsVertical
+                        ? (fullLocalStart.X + fullLocalEnd.X) / 2.0
+                        : (fullLocalStart.Y + fullLocalEnd.Y) / 2.0;
+                    double fullRangeMin = gridIsVertical
+                        ? Math.Min(fullLocalStart.Y, fullLocalEnd.Y)
+                        : Math.Min(fullLocalStart.X, fullLocalEnd.X);
+                    double fullRangeMax = gridIsVertical
+                        ? Math.Max(fullLocalStart.Y, fullLocalEnd.Y)
+                        : Math.Max(fullLocalStart.X, fullLocalEnd.X);
 
                     var candidates = new List<CurtainElevationGeometryReference>();
-                    // Prefer native CurtainGridLine curve references before solid geometry.
+                    GeometryElement geometry = gridLine.get_Geometry(options);
+                    CollectCurtainElevationGridGeometryReferences(
+                        geometry,
+                        candidates,
+                        frame,
+                        Transform.Identity,
+                        gridLine);
+
                     try
                     {
-                        AddCurtainElevationGeometryReference(fullCurve.Reference, fullCurve, candidates, frame, Transform.Identity, gridLine);
                         CurveArray segmentCurves = gridLine.AllSegmentCurves;
                         if (segmentCurves != null)
+                        {
                             foreach (Curve segment in segmentCurves)
-                                AddCurtainElevationGeometryReference(segment?.Reference, segment, candidates, frame, Transform.Identity, gridLine);
+                            {
+                                int countBefore = candidates.Count;
+                                Reference segmentReference = segment?.Reference;
+                                AddCurtainElevationGeometryReference(segmentReference, segment, candidates, frame, Transform.Identity, gridLine);
+                                if (candidates.Count <= countBefore)
+                                    continue;
+
+                                CurtainElevationGeometryReference added = candidates[candidates.Count - 1];
+                                added.ReferenceSource = "curtain_grid_curve_reference";
+                                added.ReferencePriority = 2;
+                                added.GeometryObjectType = "segment_curve";
+                            }
+                        }
+
+                        int fullCurveCountBefore = candidates.Count;
+                        Reference fullCurveReference = fullCurve.Reference;
+                        AddCurtainElevationGeometryReference(fullCurveReference, fullCurve, candidates, frame, Transform.Identity, gridLine);
+                        if (candidates.Count > fullCurveCountBefore)
+                        {
+                            CurtainElevationGeometryReference fullCurveCandidate = candidates[candidates.Count - 1];
+                            fullCurveCandidate.ReferenceSource = "curtain_grid_curve_reference";
+                            fullCurveCandidate.ReferencePriority = 3;
+                            fullCurveCandidate.GeometryObjectType = "full_curve";
+                        }
                     }
                     catch
                     {
                         // Some Revit versions expose FullCurve but not its Reference.
                     }
-                    GeometryElement geometry = gridLine.get_Geometry(options);
-                    CollectCurtainElevationGeometryReferences(geometry, candidates, frame, Transform.Identity, gridLine);
 
-                    candidates = candidates
-                        .Where(r => r.Reference != null && r.Length > tolerance)
-                        .Where(r => r.MaxX >= minX - tolerance && r.MinX <= maxX + tolerance)
-                        .Where(r => r.MaxY >= minY - tolerance && r.MinY <= maxY + tolerance)
-                        .Where(r =>
+                    foreach (CurtainElevationGeometryReference candidate in candidates)
+                    {
+                        candidate.CurtainGridLineId = id;
+                        try
                         {
-                            XYZ direction = frame.Inverse.OfVector(r.End - r.Start);
-                            if (direction.GetLength() < tolerance)
-                                return false;
-                            double alignment = Math.Abs(direction.Normalize().DotProduct(fullDirection));
-                            return alignment >= 0.98;
-                        })
-                        .OrderByDescending(r => r.Length)
-                        .ToList();
+                            candidate.StableRepresentation = candidate.Reference?.ConvertToStableRepresentation(doc);
+                        }
+                        catch
+                        {
+                            candidate.StableRepresentation = null;
+                        }
+                    }
 
-                    CurtainElevationGeometryReference best = candidates.FirstOrDefault();
+                    var evaluations = candidates.Select(candidate =>
+                    {
+                        XYZ direction = frame.Inverse.OfVector(candidate.End - candidate.Start);
+                        bool isAligned = direction.GetLength() >= tolerance &&
+                            Math.Abs(direction.Normalize().DotProduct(fullDirection)) >= 0.98;
+                        double candidateCoordinate = gridIsVertical ? candidate.CenterX : candidate.CenterY;
+                        bool positionMatches = Math.Abs(candidateCoordinate - fullCoordinate) <= tolerance;
+                        double candidateRangeMin = gridIsVertical ? candidate.MinY : candidate.MinX;
+                        double candidateRangeMax = gridIsVertical ? candidate.MaxY : candidate.MaxX;
+                        bool coversGridRange =
+                            candidateRangeMin <= fullRangeMin + tolerance &&
+                            candidateRangeMax >= fullRangeMax - tolerance;
+                        bool intersectsCurtainBounds =
+                            candidate.MaxX >= minX - tolerance &&
+                            candidate.MinX <= maxX + tolerance &&
+                            candidate.MaxY >= minY - tolerance &&
+                            candidate.MinY <= maxY + tolerance;
+                        bool usable =
+                            candidate.Reference != null &&
+                            candidate.Length > tolerance &&
+                            !string.IsNullOrWhiteSpace(candidate.StableRepresentation) &&
+                            isAligned &&
+                            positionMatches &&
+                            coversGridRange &&
+                            intersectsCurtainBounds;
+
+                        return new
+                        {
+                            Candidate = candidate,
+                            IsAligned = isAligned,
+                            PositionMatches = positionMatches,
+                            CoversGridRange = coversGridRange,
+                            IntersectsCurtainBounds = intersectsCurtainBounds,
+                            Usable = usable
+                        };
+                    }).ToList();
+
+                    CurtainElevationGeometryReference best = evaluations
+                        .Where(evaluation => evaluation.Usable)
+                        .Where(evaluation => !preferredReferencePriority.HasValue ||
+                            evaluation.Candidate.ReferencePriority == preferredReferencePriority.Value)
+                        .OrderBy(evaluation => evaluation.Candidate.ReferencePriority)
+                        .ThenByDescending(evaluation => evaluation.Candidate.Length)
+                        .Select(evaluation => evaluation.Candidate)
+                        .FirstOrDefault();
                     if (best == null)
-                        continue;
+                    {
+                        string profileSuffix = preferredReferencePriority.HasValue
+                            ? $" for reference priority profile {preferredReferencePriority.Value}"
+                            : string.Empty;
+                        failures?.Add($"CurtainGridLine {id.GetIdValue()} exposed {candidates.Count} candidate references, but none passed stable-reference, alignment, position, and range validation{profileSuffix}.");
+                    }
+                    else
+                    {
+                        best.SelectedForDimension = true;
+                        best.SelectionReason = $"priority_{best.ReferencePriority}_stable_aligned_position_matched_full_range";
+                        selected.Add(best);
+                    }
 
-                    best.CurtainGridLineId = id;
-                    best.GeometryObjectType = best.GeometryObjectType ?? "Curve";
-                    best.SelectedForDimension = true;
-                    best.SelectionReason = "longest_reference_aligned_with_full_curve";
-                    try
+                    foreach (var evaluation in evaluations)
                     {
-                        best.StableRepresentation = best.Reference.ConvertToStableRepresentation(doc);
+                        CurtainElevationGeometryReference candidate = evaluation.Candidate;
+                        bool isSelected = candidate == best;
+                        diagnostics?.Add(new CurtainGridLineReferenceDiagnostic
+                        {
+                            GridLineId = id.GetIdValue(),
+                            ProjectedDirection = candidate.IsVertical
+                                ? "vertical"
+                                : (candidate.IsHorizontal ? "horizontal" : "other"),
+                            ReferenceSource = candidate.ReferenceSource,
+                            GeometryObjectType = candidate.GeometryObjectType,
+                            ReferenceAvailable = candidate.Reference != null,
+                            StableRepresentation = candidate.StableRepresentation,
+                            ProjectedCoordinateMm = Math.Round((gridIsVertical ? candidate.CenterX : candidate.CenterY) * 304.8, 1),
+                            LengthMm = Math.Round(candidate.Length * 304.8, 1),
+                            ReferencePriority = candidate.ReferencePriority,
+                            IsAligned = evaluation.IsAligned,
+                            PositionMatches = evaluation.PositionMatches,
+                            CoversGridRange = evaluation.CoversGridRange,
+                            SelectedForDimension = isSelected,
+                            SelectionReason = isSelected
+                                ? best.SelectionReason
+                                : BuildCurtainGridReferenceRejectionReason(
+                                    candidate,
+                                    evaluation.IsAligned,
+                                    evaluation.PositionMatches,
+                                    evaluation.CoversGridRange,
+                                    evaluation.IntersectsCurtainBounds)
+                        });
                     }
-                    catch
-                    {
-                        best.StableRepresentation = null;
-                    }
-                    selected.Add(best);
                 }
-                catch
+                catch (Exception ex)
                 {
-                    // A grid line can exist without reference-bearing project geometry.
+                    failures?.Add($"CurtainGridLine {id.GetIdValue()} geometry extraction failed: {ex.Message}");
                 }
             }
 
@@ -1811,6 +2740,104 @@ namespace RevitMCP.Core
                 .Select(g => g.OrderByDescending(r => r.Length).First())
                 .ToList();
         }
+
+        private void CollectCurtainElevationGridGeometryReferences(
+            GeometryElement geometry,
+            List<CurtainElevationGeometryReference> references,
+            Transform viewFrame,
+            Transform geometryTransform,
+            CurtainGridLine gridLine)
+        {
+            if (geometry == null || references == null || viewFrame == null || gridLine == null)
+                return;
+
+            foreach (GeometryObject obj in geometry)
+            {
+                if (obj == null)
+                    continue;
+
+                if (obj is GeometryInstance instance)
+                {
+                    try
+                    {
+                        Transform nextTransform = geometryTransform.Multiply(instance.Transform);
+                        CollectCurtainElevationGridGeometryReferences(
+                            instance.GetSymbolGeometry(),
+                            references,
+                            viewFrame,
+                            nextTransform,
+                            gridLine);
+                    }
+                    catch
+                    {
+                        try
+                        {
+                            CollectCurtainElevationGridGeometryReferences(
+                                instance.GetInstanceGeometry(),
+                                references,
+                                viewFrame,
+                                geometryTransform,
+                                gridLine);
+                        }
+                        catch
+                        {
+                            // Ignore geometry instance extraction failures.
+                        }
+                    }
+
+                    continue;
+                }
+
+                if (!(obj is Curve curve))
+                    continue;
+
+                int countBefore = references.Count;
+                AddCurtainElevationGeometryReference(
+                    curve.Reference,
+                    curve,
+                    references,
+                    viewFrame,
+                    geometryTransform,
+                    gridLine);
+                if (references.Count <= countBefore)
+                    continue;
+
+                CurtainElevationGeometryReference added = references[references.Count - 1];
+                bool isInternalLine = curve is Line;
+                added.ReferenceSource = isInternalLine
+                    ? "curtain_grid_internal_geometry_reference"
+                    : "curtain_grid_curve_reference";
+                added.ReferencePriority = isInternalLine ? 0 : 1;
+                added.GeometryObjectType = isInternalLine
+                    ? "internal_line"
+                    : $"internal_{curve.GetType().Name}";
+            }
+        }
+
+        private string BuildCurtainGridReferenceRejectionReason(
+            CurtainElevationGeometryReference candidate,
+            bool isAligned,
+            bool positionMatches,
+            bool coversGridRange,
+            bool intersectsCurtainBounds)
+        {
+            var reasons = new List<string>();
+            if (candidate?.Reference == null)
+                reasons.Add("reference_unavailable");
+            if (candidate == null || string.IsNullOrWhiteSpace(candidate.StableRepresentation))
+                reasons.Add("stable_representation_unavailable");
+            if (!isAligned)
+                reasons.Add("not_aligned");
+            if (!positionMatches)
+                reasons.Add("position_mismatch");
+            if (!coversGridRange)
+                reasons.Add("does_not_cover_full_grid_range");
+            if (!intersectsCurtainBounds)
+                reasons.Add("outside_curtain_bounds");
+
+            return reasons.Count > 0 ? string.Join(",", reasons) : "lower_priority_candidate";
+        }
+
         private List<double> NormalizeCurtainElevationDimensionCoordinates(IEnumerable<double> coordinates)
         {
             const double tolerance = 1.0 / 304.8;
