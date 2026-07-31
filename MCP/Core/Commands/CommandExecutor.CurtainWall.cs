@@ -21,6 +21,7 @@ namespace RevitMCP.Core
     public partial class CommandExecutor
     {
         private const double CurtainElevationDirectionDotThreshold = 0.98;
+        private const double CurtainElevationWallTagHeightFromCropBottomFt = 5200.0 / 304.8;
 
         #region 帷幕牆工具
 
@@ -241,6 +242,13 @@ namespace RevitMCP.Core
             string dimensionTypeSelectionMode = parameters["dimensionTypeSelectionMode"]?.Value<string>()?.Trim().ToLowerInvariant() ?? "auto";
             double dimensionOffsetFt = (parameters["dimensionOffsetMm"]?.Value<double>() ?? 300.0) / 304.8;
             double dimensionStackOffsetFallbackFt = (parameters["dimensionStackOffsetMm"]?.Value<double>() ?? 250.0) / 304.8;
+            IdType? wallTagTypeId = parameters["wallTagTypeId"]?.Value<IdType?>();
+            if (!wallTagTypeId.HasValue || wallTagTypeId.Value == 0)
+                return BuildCurtainElevationWallTagTypePrompt(doc);
+
+            FamilySymbol wallTagType = ResolveCurtainElevationWallTagType(doc, wallTagTypeId.Value);
+            string wallTagTypeName = GetCurtainElevationWallTagTypeDisplayName(wallTagType);
+            var wallTagWarnings = new List<string>();
             var dimensionWarnings = new List<string>();
             CurtainElevationDimensionTypeResolution dimensionTypeResolution = ResolveCurtainElevationDimensionType(doc, parameters, dimensionWarnings);
             DimensionType dimensionType = addDimensions ? dimensionTypeResolution.DimensionType : null;
@@ -316,6 +324,15 @@ namespace RevitMCP.Core
                         ResolvedExteriorSide = exterior?.SideName,
                         ResolvedExteriorSource = exterior?.Source,
                         ResolvedExteriorDirection = ToCurtainElevationXyz(exterior?.ExteriorDirection),
+                        CropBottomRule = "min(wall_level_y, curtain_geometry_min_y) - vertical_margin",
+                        CropBottomBoundarySource = level != null ? "planned_wall_level_or_geometry_min" : "visible_geometry_fallback",
+                        CropBottomLevelId = level?.Id.GetIdValue(),
+                        CropBottomLevelName = level?.Name,
+                        CropBottomLevelElevationMm = level != null ? Math.Round(level.Elevation * 304.8, 2) : (double?)null,
+                        CropVerticalMarginMm = Math.Round(verticalMarginFt * 304.8, 2),
+                        CropWarnings = level == null
+                            ? new[] { "wall LevelId did not resolve to a Level; dry-run will use visible geometry bottom." }
+                            : new string[0],
                         AddDimensions = addDimensions,
                         DimensionTypeId = dimensionType?.Id.GetIdValue(),
                         DimensionTypeName = dimensionType?.Name,
@@ -332,6 +349,22 @@ namespace RevitMCP.Core
                         DimensionStackOffsetSource = dryRunStackOffsetResolution.Source,
                         DimensionStackOffsetFallbackReason = dryRunStackOffsetResolution.FallbackReason,
                         DimensionStatus = addDimensions ? "dry_run" : "disabled",
+                        CurtainBottomToLevelDistanceMm = (double?)null,
+                        LevelOffsetDimensionMode = addDimensions ? "dry_run_level_aware" : "disabled",
+                        LevelOffsetDimensionElementId = (IdType)0,
+                        LevelOffsetDimensionStatus = addDimensions ? "dry_run" : "disabled",
+                        LevelOffsetDimensionRule = "same_total_height_chain_when_bottom_above_level; skip_within_1_mm; separate_outer_when_bottom_below_level",
+                        WallTagId = (IdType)0,
+                        WallTagStatus = "dry_run",
+                        WallTagPositionMm = new
+                        {
+                            X = (double?)null,
+                            Y = 5200.0,
+                            Z = 0.0,
+                            CoordinateSystem = "view_2d",
+                            XRule = "curtain_center",
+                            YRule = "crop_bottom_plus_5200_mm"
+                        },
                         IsPersistentOutput = true,
                         DryRun = true
                     });
@@ -356,6 +389,9 @@ namespace RevitMCP.Core
                     DimensionTypeName = dimensionType?.Name,
                     DimensionTypeSource = dimensionTypeResolution.Source,
                     DimensionWarnings = dimensionWarnings,
+                    WallTagTypeId = wallTagType.Id.GetIdValue(),
+                    WallTagTypeName = wallTagTypeName,
+                    WallTagWarnings = wallTagWarnings,
                     Created = created,
                     Skipped = skipped,
                     TemplateWarnings = templateWarnings
@@ -448,6 +484,7 @@ namespace RevitMCP.Core
                         elevationView.Scale = scale;
                         CurtainElevationCropResult cropResult = ConfigureCurtainElevationCrop(doc, elevationView, wall, wallMid, markerPoint, horizontalMarginFt, verticalMarginFt, fallbackDepthFt);
                         ConfigureCurtainElevationFarClip(elevationView, cropResult, templateWarnings);
+                        DisableCurtainElevationAnnotationCrop(elevationView, wallTagWarnings);
                         var dimensionJob = new CurtainElevationDimensionJob
                         {
                             View = elevationView,
@@ -524,6 +561,31 @@ namespace RevitMCP.Core
                                 ? Math.Round(cropResult.WallBoundaryMaxXFt.Value * 304.8, 2)
                                 : (double?)null,
                             CropHorizontalMarginMm = Math.Round(cropResult.HorizontalMarginFt * 304.8, 2),
+                            CropVerticalMarginMm = Math.Round(cropResult.VerticalMarginFt * 304.8, 2),
+                            CropBottomRule = "min(wall_level_y, curtain_geometry_min_y) - vertical_margin",
+                            CropBottomBoundarySource = cropResult.CropBottomBoundarySource,
+                            CropBottomBoundaryFallbackReason = cropResult.CropBottomBoundaryFallbackReason,
+                            CropBottomLevelId = cropResult.CropBottomLevelId?.GetIdValue(),
+                            CropBottomLevelName = cropResult.CropBottomLevelName,
+                            CropBottomLevelElevationMm = cropResult.CropBottomLevelElevationFt.HasValue
+                                ? Math.Round(cropResult.CropBottomLevelElevationFt.Value * 304.8, 2)
+                                : (double?)null,
+                            CropBottomLevelViewYmm = cropResult.CropBottomLevelViewYFt.HasValue
+                                ? Math.Round(cropResult.CropBottomLevelViewYFt.Value * 304.8, 2)
+                                : (double?)null,
+                            CurtainGeometryMinYmm = cropResult.CurtainGeometryMinYFt.HasValue
+                                ? Math.Round(cropResult.CurtainGeometryMinYFt.Value * 304.8, 2)
+                                : (double?)null,
+                            CurtainGeometryMaxYmm = cropResult.CurtainGeometryMaxYFt.HasValue
+                                ? Math.Round(cropResult.CurtainGeometryMaxYFt.Value * 304.8, 2)
+                                : (double?)null,
+                            CropBottomBeforeMarginYmm = cropResult.CropBottomBeforeMarginYFt.HasValue
+                                ? Math.Round(cropResult.CropBottomBeforeMarginYFt.Value * 304.8, 2)
+                                : (double?)null,
+                            CropBottomResolvedYmm = cropResult.View2DMin != null
+                                ? Math.Round(cropResult.View2DMin.Y * 304.8, 2)
+                                : (double?)null,
+                            CropWarnings = cropResult.CropWarnings,
                             Crop2DPointCount = cropResult.View2DPointCount,
                             Crop2DSource = cropResult.View2DSource,
                             Crop2DExtremeContributors = cropResult.View2DExtremeContributors,
@@ -551,14 +613,22 @@ namespace RevitMCP.Core
                             DimensionStatus = dimensionJob.Result.Status,
                             TotalWidthDimensionId = dimensionJob.Result.TotalWidthDimensionId?.GetIdValue(),
                             TotalHeightDimensionId = dimensionJob.Result.TotalHeightDimensionId?.GetIdValue(),
+                            CurtainBottomToLevelDistanceMm = dimensionJob.Result.CurtainBottomToLevelDistanceFt.HasValue
+                                ? Math.Round(dimensionJob.Result.CurtainBottomToLevelDistanceFt.Value * 304.8, 3)
+                                : (double?)null,
+                            LevelOffsetDimensionMode = dimensionJob.Result.LevelOffsetDimensionMode,
+                            LevelOffsetDimensionElementId = dimensionJob.Result.LevelOffsetDimensionElementId?.GetIdValue(),
+                            LevelOffsetDimensionStatus = dimensionJob.Result.LevelOffsetDimensionStatus,
                             HorizontalGridDimensionId = dimensionJob.Result.HorizontalGridDimensionId?.GetIdValue(),
                             VerticalGridDimensionId = dimensionJob.Result.VerticalGridDimensionId?.GetIdValue(),
                             TotalWidthDimensionAreReferencesAvailable = dimensionJob.Result.TotalWidthDimensionAreReferencesAvailable,
                             HorizontalGridDimensionAreReferencesAvailable = dimensionJob.Result.HorizontalGridDimensionAreReferencesAvailable,
                             TotalHeightDimensionAreReferencesAvailable = dimensionJob.Result.TotalHeightDimensionAreReferencesAvailable,
+                            LevelOffsetDimensionAreReferencesAvailable = dimensionJob.Result.LevelOffsetDimensionAreReferencesAvailable,
                             VerticalGridDimensionAreReferencesAvailable = dimensionJob.Result.VerticalGridDimensionAreReferencesAvailable,
                             TotalWidthDimensionReferenceSource = dimensionJob.Result.TotalWidthDimensionReferenceSource,
                             TotalHeightDimensionReferenceSource = dimensionJob.Result.TotalHeightDimensionReferenceSource,
+                            LevelOffsetDimensionReferenceSource = dimensionJob.Result.LevelOffsetDimensionReferenceSource,
                             HorizontalGridDimensionReferenceSource = dimensionJob.Result.HorizontalGridDimensionReferenceSource,
                             VerticalGridDimensionReferenceSource = dimensionJob.Result.VerticalGridDimensionReferenceSource,
                             GeometryReferenceCount = dimensionJob.Result.GeometryReferenceCount,
@@ -572,6 +642,10 @@ namespace RevitMCP.Core
                             DimensionFallbackReason = dimensionJob.Result.DimensionFallbackReason,
                             DimensionCreationErrors = dimensionJob.Result.CreationErrors,
                             DimensionWarnings = dimensionJob.Result.Warnings,
+                            WallTagId = dimensionJob.WallTagId?.GetIdValue(),
+                            WallTagStatus = dimensionJob.WallTagStatus,
+                            WallTagPositionMm = ToCurtainElevationPointMm(dimensionJob.WallTagViewPosition),
+                            WallTagWorldPositionMm = ToCurtainElevationPointMm(dimensionJob.WallTagWorldPosition),
                             WasViewOpenBeforeDimensioning = dimensionJob.Result.WasViewOpenBeforeDimensioning,
                             WasViewActiveBeforeDimensioning = dimensionJob.Result.WasViewActiveBeforeDimensioning,
                             ViewActivationSucceeded = dimensionJob.Result.ViewActivationSucceeded,
@@ -697,6 +771,13 @@ namespace RevitMCP.Core
                             VerifyCurtainElevationDimensionResult(doc, dimensionJob.View, dimensionJob.Result);
                             dimensionWarnings.AddRange(dimensionJob.Result.Warnings.Select(warning =>
                                 $"Wall {dimensionJob.Wall.Id.GetIdValue()}: {warning}"));
+
+                            using (Transaction tagTransaction = TransactionHelper.Begin(doc, "放置帷幕立面牆標籤"))
+                            {
+                                tagTransaction.Start();
+                                CreateCurtainElevationWallTag(doc, dimensionJob, wallTagType);
+                                tagTransaction.Commit();
+                            }
                         }
                     }
                     finally
@@ -757,12 +838,176 @@ namespace RevitMCP.Core
                 DimensionTypeName = dimensionType?.Name,
                 DimensionTypeSource = dimensionTypeResolution.Source,
                 DimensionWarnings = dimensionWarnings,
+                WallTagTypeId = wallTagType.Id.GetIdValue(),
+                WallTagTypeName = wallTagTypeName,
+                WallTagWarnings = wallTagWarnings,
                 Created = created,
                 Skipped = skipped,
                 TemplateWarnings = templateWarnings
             };
         }
 
+        private object BuildCurtainElevationWallTagTypePrompt(Document doc)
+        {
+            List<FamilySymbol> availableTypes = GetCurtainElevationWallTagTypes(doc);
+            bool hasAvailableTypes = availableTypes.Count > 0;
+
+            return new
+            {
+                Success = false,
+                WorkflowState = "awaiting_wall_tag_type_selection",
+                NextAction = hasAvailableTypes ? "select_wall_tag_type" : "load_wall_tag_family",
+                RequiresUserInput = true,
+                NoModelChanges = true,
+                ElevationsCreated = false,
+                MissingFields = new[] { "wallTagTypeId" },
+                PromptToUser = hasAvailableTypes
+                    ? "請選擇牆標籤類型；應選擇具有[標記]參數的標籤類型。"
+                    : "目前專案沒有已載入的牆標籤類型；請先載入牆標籤族，並應選擇具有[標記]參數的標籤類型。",
+                Message = hasAvailableTypes
+                    ? "Wall tag type selection is required; no curtain elevation views were created."
+                    : "No loaded wall tag types were found; no curtain elevation views were created.",
+                AvailableWallTagTypes = availableTypes.Select(symbol => new
+                {
+                    TypeId = symbol.Id.GetIdValue(),
+                    FamilyName = symbol.Family?.Name ?? "",
+                    TypeName = symbol.Name,
+                    DisplayName = GetCurtainElevationWallTagTypeDisplayName(symbol)
+                }).ToList()
+            };
+        }
+
+        private List<FamilySymbol> GetCurtainElevationWallTagTypes(Document doc)
+        {
+            if (doc == null)
+                return new List<FamilySymbol>();
+
+            return new FilteredElementCollector(doc)
+                .OfClass(typeof(FamilySymbol))
+                .WhereElementIsElementType()
+                .Cast<FamilySymbol>()
+                .Where(IsCurtainElevationWallTagType)
+                .OrderBy(symbol => symbol.Family?.Name ?? "")
+                .ThenBy(symbol => symbol.Name)
+                .ToList();
+        }
+
+        private FamilySymbol ResolveCurtainElevationWallTagType(Document doc, IdType wallTagTypeId)
+        {
+            FamilySymbol symbol = doc?.GetElement(new ElementId(wallTagTypeId)) as FamilySymbol;
+            if (!IsCurtainElevationWallTagType(symbol))
+            {
+                throw new ArgumentException(
+                    $"wallTagTypeId={wallTagTypeId} 不是有效的牆標籤類型；請選擇 OST_WallTags 的 FamilySymbol，並應選擇具有[標記]參數的標籤類型。");
+            }
+
+            return symbol;
+        }
+
+        private bool IsCurtainElevationWallTagType(FamilySymbol symbol)
+        {
+            return symbol?.Category?.Id != null &&
+                symbol.Category.Id.GetIdValue() == (IdType)(int)BuiltInCategory.OST_WallTags;
+        }
+
+        private string GetCurtainElevationWallTagTypeDisplayName(FamilySymbol symbol)
+        {
+            if (symbol == null)
+                return null;
+
+            string familyName = symbol.Family?.Name;
+            return string.IsNullOrWhiteSpace(familyName)
+                ? symbol.Name
+                : $"{familyName}: {symbol.Name}";
+        }
+
+        private void DisableCurtainElevationAnnotationCrop(ViewSection view, List<string> warnings)
+        {
+            if (view == null)
+                return;
+
+            foreach (BuiltInParameter builtInParameter in Enum.GetValues(typeof(BuiltInParameter)))
+            {
+                string parameterName = builtInParameter.ToString();
+                if (parameterName.IndexOf("ANNOTATION", StringComparison.OrdinalIgnoreCase) < 0 ||
+                    parameterName.IndexOf("CROP", StringComparison.OrdinalIgnoreCase) < 0)
+                {
+                    continue;
+                }
+
+                Parameter parameter = view.get_Parameter(builtInParameter);
+                if (parameter == null || parameter.StorageType != StorageType.Integer)
+                    continue;
+
+                if (parameter.IsReadOnly)
+                {
+                    if (parameter.AsInteger() != 0)
+                        throw new InvalidOperationException($"立面 {view.Id.GetIdValue()} 的 annotation crop 受鎖定且無法關閉。");
+
+                    continue;
+                }
+
+                parameter.Set(0);
+                if (parameter.AsInteger() != 0)
+                    throw new InvalidOperationException($"立面 {view.Id.GetIdValue()} 的 annotation crop 關閉驗證失敗。");
+            }
+        }
+
+        private void CreateCurtainElevationWallTag(
+            Document doc,
+            CurtainElevationDimensionJob job,
+            FamilySymbol wallTagType)
+        {
+            if (doc == null || job?.View == null || job.Wall == null || job.CropResult == null)
+                throw new InvalidOperationException("無法取得帷幕立面牆標籤所需的 view、wall 或 crop 資料。");
+            if (job.CropResult.View2DOrigin == null ||
+                job.CropResult.View2DRightDirection == null ||
+                job.CropResult.View2DUpDirection == null ||
+                job.CropResult.View2DMin == null ||
+                job.CropResult.View2DMax == null)
+            {
+                throw new InvalidOperationException($"立面 {job.View.Id.GetIdValue()} 缺少可用的 2D crop 座標。");
+            }
+
+            double minX = job.CropResult.WallBoundaryMinXFt ?? job.CropResult.View2DMin.X;
+            double maxX = job.CropResult.WallBoundaryMaxXFt ?? job.CropResult.View2DMax.X;
+            double tagX = (minX + maxX) / 2.0;
+            double tagY = job.CropResult.View2DMin.Y + CurtainElevationWallTagHeightFromCropBottomFt;
+            XYZ viewPosition = new XYZ(tagX, tagY, 0.0);
+
+            Transform viewFrame = Transform.Identity;
+            viewFrame.Origin = job.CropResult.View2DOrigin;
+            viewFrame.BasisX = NormalizeOrFallback(job.CropResult.View2DRightDirection, job.View.RightDirection);
+            viewFrame.BasisY = NormalizeOrFallback(job.CropResult.View2DUpDirection, job.View.UpDirection);
+            viewFrame.BasisZ = NormalizeOrFallback(job.View.ViewDirection, XYZ.BasisZ);
+            XYZ worldPosition = viewFrame.OfPoint(viewPosition);
+
+            if (!wallTagType.IsActive)
+            {
+                wallTagType.Activate();
+                doc.Regenerate();
+            }
+
+            IndependentTag tag = IndependentTag.Create(
+                doc,
+                wallTagType.Id,
+                job.View.Id,
+                new Reference(job.Wall),
+                false,
+                TagOrientation.Horizontal,
+                worldPosition);
+            if (tag == null)
+                throw new InvalidOperationException($"立面 {job.View.Id.GetIdValue()} 的牆標籤建立失敗。");
+
+            tag.TagHeadPosition = worldPosition;
+            if (tag.GetTypeId() != wallTagType.Id)
+                tag.ChangeTypeId(wallTagType.Id);
+
+            job.WallTagId = tag.Id;
+            job.WallTagStatus = "created";
+            job.WallTagViewPosition = viewPosition;
+            job.WallTagWorldPosition = worldPosition;
+        }
         private object DiagnoseCurtainWallElevationDirection(JObject parameters)
         {
             Document doc = _uiApp.ActiveUIDocument.Document;
@@ -1503,6 +1748,17 @@ namespace RevitMCP.Core
             public double? WallBoundaryMinXFt { get; set; }
             public double? WallBoundaryMaxXFt { get; set; }
             public double HorizontalMarginFt { get; set; }
+            public double VerticalMarginFt { get; set; }
+            public double? CurtainGeometryMinYFt { get; set; }
+            public double? CurtainGeometryMaxYFt { get; set; }
+            public ElementId CropBottomLevelId { get; set; }
+            public string CropBottomLevelName { get; set; }
+            public double? CropBottomLevelElevationFt { get; set; }
+            public double? CropBottomLevelViewYFt { get; set; }
+            public double? CropBottomBeforeMarginYFt { get; set; }
+            public string CropBottomBoundarySource { get; set; } = "visible_geometry_fallback";
+            public string CropBottomBoundaryFallbackReason { get; set; }
+            public List<string> CropWarnings { get; set; } = new List<string>();
             public int View2DPointCount { get; set; }
             public string View2DSource { get; set; }
             public object View2DExtremeContributors { get; set; }
@@ -1853,6 +2109,16 @@ namespace RevitMCP.Core
                 return result;
 
             result.HorizontalMarginFt = horizontalMarginFt;
+            result.VerticalMarginFt = verticalMarginFt;
+            result.CurtainGeometryMinYFt = view2DExtents.Min.Y;
+            result.CurtainGeometryMaxYFt = view2DExtents.Max.Y;
+            ResolveCurtainElevationLevelAwareCropBottom(
+                doc,
+                wall,
+                wallMidPoint,
+                view2DFrame,
+                view2DExtents.Min.Y,
+                result);
             CurtainElevationLocalExtents cropView2DExtents = view2DExtents;
             if (TryGetCurtainElevationStraightWallHorizontalBoundary(
                 wall,
@@ -1885,6 +2151,18 @@ namespace RevitMCP.Core
                 result.HorizontalBoundaryFallbackReason = boundaryFallbackReason;
             }
 
+            double cropBottomBeforeMargin = result.CropBottomBeforeMarginYFt ?? view2DExtents.Min.Y;
+            cropView2DExtents = new CurtainElevationLocalExtents
+            {
+                Min = new XYZ(cropView2DExtents.Min.X, cropBottomBeforeMargin, cropView2DExtents.Min.Z),
+                Max = cropView2DExtents.Max,
+                MinXRecord = cropView2DExtents.MinXRecord,
+                MaxXRecord = cropView2DExtents.MaxXRecord,
+                MinYRecord = cropView2DExtents.MinYRecord,
+                MaxYRecord = cropView2DExtents.MaxYRecord,
+                MinZRecord = cropView2DExtents.MinZRecord,
+                MaxZRecord = cropView2DExtents.MaxZRecord
+            };
             CurtainElevationLocalExtents cropFrameExtents = ConvertCurtainElevationView2DExtentsToCropFrameExtents(
                 view2DFrame,
                 cropView2DExtents,
@@ -1936,6 +2214,65 @@ namespace RevitMCP.Core
             return result;
         }
 
+        private void ResolveCurtainElevationLevelAwareCropBottom(
+            Document doc,
+            Wall wall,
+            XYZ wallMidPoint,
+            Transform view2DFrame,
+            double curtainGeometryMinYFt,
+            CurtainElevationCropResult result)
+        {
+            result.CropBottomBeforeMarginYFt = curtainGeometryMinYFt;
+            result.CropBottomBoundarySource = "visible_geometry_fallback";
+
+            Level level = doc?.GetElement(wall?.LevelId) as Level;
+            if (level == null)
+            {
+                result.CropBottomBoundaryFallbackReason = "wall LevelId did not resolve to a Level; retained visible geometry bottom.";
+                result.CropWarnings.Add(result.CropBottomBoundaryFallbackReason);
+                return;
+            }
+
+            result.CropBottomLevelId = level.Id;
+            result.CropBottomLevelName = level.Name;
+            result.CropBottomLevelElevationFt = level.Elevation;
+
+            XYZ anchor = wallMidPoint;
+            if (anchor == null)
+            {
+                try
+                {
+                    anchor = (wall.Location as LocationCurve)?.Curve?.Evaluate(0.5, true);
+                }
+                catch
+                {
+                    anchor = null;
+                }
+            }
+
+            if (anchor == null || view2DFrame == null)
+            {
+                result.CropBottomBoundaryFallbackReason = "wall midpoint or elevation view 2D frame was unavailable; retained visible geometry bottom.";
+                result.CropWarnings.Add(result.CropBottomBoundaryFallbackReason);
+                return;
+            }
+
+            try
+            {
+                XYZ levelPoint = new XYZ(anchor.X, anchor.Y, level.Elevation);
+                double levelViewYFt = view2DFrame.Inverse.OfPoint(levelPoint).Y;
+                result.CropBottomLevelViewYFt = levelViewYFt;
+                result.CropBottomBeforeMarginYFt = Math.Min(levelViewYFt, curtainGeometryMinYFt);
+                result.CropBottomBoundarySource = curtainGeometryMinYFt < levelViewYFt - 1e-6
+                    ? "curtain_geometry_below_wall_level"
+                    : "wall_level";
+            }
+            catch (Exception ex)
+            {
+                result.CropBottomBoundaryFallbackReason = "failed to project wall Level elevation into view 2D coordinates; retained visible geometry bottom: " + ex.Message;
+                result.CropWarnings.Add(result.CropBottomBoundaryFallbackReason);
+            }
+        }
         private bool TryGetCurtainElevationStraightWallHorizontalBoundary(
             Wall wall,
             Transform view2DFrame,

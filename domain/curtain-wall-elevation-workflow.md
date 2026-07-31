@@ -330,6 +330,24 @@ view_2d_visible_bounds
 - `CropFallbackElementIds`
 - `CropRegionShapeApplied = false`
 
+### Level-aware Crop Bottom
+
+垂直 crop bottom 使用 wall 所屬 `wall.LevelId`，不可用最近 Level 或幾何高度重新猜測：
+
+```text
+levelY = project(Level.Elevation into elevation view 2D frame)
+cropBottomBeforeMarginY = min(levelY, curtainGeometryMinY)
+cropBottomY = cropBottomBeforeMarginY - verticalMargin
+cropTopY = curtainGeometryMaxY + verticalMargin
+```
+
+- 一般帷幕且 `verticalMarginMm = 0` 時，底界精確對齊所屬樓層線。
+- 帷幕幾何低於樓層線時，底界保留幾何 MinY，避免裁掉負 Base Offset 或其他下伸部分。
+- Level、牆中心或 2D frame 無法解析時，fallback 到幾何 MinY，並在 `CropWarnings` 與 `CropBottomBoundaryFallbackReason` 回報。
+- `View2DMin` / `CropBottomResolvedYmm` 代表實際 crop bottom；尺寸與 grid reference 搜尋必須使用獨立的 `CurtainGeometryMinY` / `CurtainGeometryMaxY`，不可把樓層線當成尺寸邊界。
+- 牆標籤仍以實際 crop bottom 加 `5200 mm` 定位。
+
+`Created[]` 需回傳 `CropBottomBoundarySource`、Level ID/name/elevation、Level view Y、帷幕幾何 MinY/MaxY、margin 前後的 resolved bottom 與 `CropWarnings`。
 debug SOP：
 
 - 如果 crop 還是偏大，先跑 `diagnose_curtain_wall_elevation_directions` 並設定 `includeCropDiagnostics = true`。
@@ -340,7 +358,7 @@ debug SOP：
 
 - `CropBoxActive = true`
 - `CropBoxVisible = false`
-- crop box 貼合帷幕所有相關元素在 elevation view 2D 畫面中的最小矩形範圍
+- crop box 水平與頂部貼合帷幕幾何；底部使用 Level-aware 規則，並保留低於樓層線的帷幕幾何
 - `VIEWER_BOUND_ACTIVE = 1`
 - `VIEWER_BOUND_FAR_CLIPPING = 2`，也就是 UI 的「剪裁含線」
 - `VIEWER_BOUND_OFFSET = autoDepthFt`
@@ -495,6 +513,26 @@ template 不控制：
 - far clip offset / depth
 
 因此每張帷幕立面仍可保留自己的 crop box 與 far clip depth。
+
+## Wall Tag Selection and Placement
+
+`create_curtain_wall_elevations` 在任何模型變更前必須取得 `wallTagTypeId`：
+
+- 未提供時回傳 `WorkflowState = "awaiting_wall_tag_type_selection"`、`RequiresUserInput = true`、`NoModelChanges = true`。
+- `AvailableWallTagTypes[]` 列出已載入的 `OST_WallTags` `FamilySymbol`，欄位為 `TypeId`、`FamilyName`、`TypeName`、`DisplayName`。
+- 提示文字必須包含「應選擇具有[標記]參數的標籤類型」。Revit API 不可靠地公開 tag family label 綁定，因此不自動判斷族內 Label 是否綁定 `Mark`。
+- 無已載入類型時回傳 `NextAction = "load_wall_tag_family"`；錯誤或非牆標籤的 ID 必須在 Transaction 前拒絕。
+
+每張成功建立的帷幕立面在尺寸流程完成後，以 `IndependentTag` 建立一個無引線、水平的牆標籤：
+
+```text
+viewX = (curtainBoundaryMinX + curtainBoundaryMaxX) / 2
+viewY = cropBottomY + 5200 mm
+```
+
+標籤 reference 必須指向該立面的目標 curtain wall。`OST_WallTags` 在 View Template 中保持可見，annotation crop 必須關閉；任一已建立立面的標籤失敗時回滾整個 `TransactionGroup`。
+
+批次輸出增加 `WallTagTypeId`、`WallTagTypeName`、`WallTagWarnings`；每個 `Created[]` 增加 `WallTagId`、`WallTagStatus`、`WallTagPositionMm`（view 2D 座標）與 `WallTagWorldPositionMm`。
 
 ## Failure Semantics
 
@@ -706,6 +744,25 @@ Flipped = false -> opposite_orientation
 - 左側內層：水平帷幕網格投影形成的垂直尺寸鏈。
 - 左側外層：總高。
 
+### 樓層線至帷幕底部尺寸
+
+左側總高尺寸使用帷幕實際幾何底部、頂部與 `wall.LevelId` 的 Level Reference：
+
+- 帷幕底高於樓層線超過 `1 mm`：在同一總高尺寸鏈加入樓層線，顯示樓層至帷幕底與帷幕總高兩段。
+- 絕對距離小於等於 `1 mm`：視為零，不加入樓層距離段。
+- 帷幕底低於樓層線超過 `1 mm`：保留原總高尺寸，並在其左側再偏移一個 `dimensionStackOffset` 建立獨立尺寸。
+- Level 幾何 Reference 必須使用 `Level.GetPlaneReference()`，並驗證 stable representation 可 round-trip；禁止使用 `new Reference(level)`。
+- Level plane Reference 無法使用或被 `NewDimension` 拒絕時，在投影後的 Level Y 建立 view-specific 細部線，強制套用 `OST_InvisibleLines`，再使用其幾何 Reference。
+- 無法取得或套用 Invisible Lines 時必須刪除輔助線並保留原總高，不可留下可見細部線。
+- 同鏈尺寸 commit 後驗證失敗時，回退為原總高加外側獨立尺寸，樓層端改用不可見細部線 Reference；獨立樓層距離尺寸驗證失敗時也採相同修復。
+- `wall_level_plane_reference` 且為 `level_offset` 或包含 Level offset 的增強總高鏈時，Revit 若在 commit 後回傳 `AreReferencesAvailable = false`，只有 Dimension 存在、OwnerView、Reference 數量及 segment values（容差 `0.5 mm`）全部正確才保留，validation mode 為 `level_plane_segment_validation`；API 原始 false 值照實回傳。
+- 上述例外不得套用至一般總高、總寬、CurtainGrid 或其他 geometry／DetailCurve 尺寸，這些尺寸維持 strict `AreReferencesAvailable` 驗證。
+- Level offset 的 Invisible Lines 備援可額外按 `GraphicsStyleCategory.Id == OST_InvisibleLines` 尋找 Projection style；共用尺寸 fallback 的線型解析行為不變。
+- `LevelOffsetDimensionReferenceSource` 區分 `wall_level_plane_reference` 與 `invisible_detail_curve_fallback`。
+- Level Reference 解析與細部線建立只需要 `Document.Regenerate()`，不要求為此切換 `ActiveView`；既有 CurtainGridLine 原生 Reference 流程仍可依其自身需求啟用目標視圖。
+
+`Created[]` 回傳 `CurtainBottomToLevelDistanceMm`、`LevelOffsetDimensionMode`、`LevelOffsetDimensionElementId`、`LevelOffsetDimensionStatus`、`LevelOffsetDimensionAreReferencesAvailable` 與 `LevelOffsetDimensionReferenceSource`。
+
 直線帷幕的水平尺寸鏈以 `Wall.LocationCurve` 兩個端點投影至立面 `RightDirection` 後的原始邊界為準，不使用 panel、mullion 或 insert bounding box，也不包含 `horizontalMarginMm`。crop 左右界才會在原始邊界外加 `horizontalMarginMm`；預設為 `0` 時，crop 與帷幕左右端點一致。原生 geometry reference 必須位於端點 `1 mm` 內；找不到時使用端點座標建立 Invisible detail curve reference，不退回最近的豎框外緣。非直線 LocationCurve 保留既有可視幾何範圍並回傳 fallback 原因。
 
 尺寸線的垂直座標仍以立面的 `UpDirection` 與已驗證的 `Crop2DMin`／`Crop2DMax` 為基準。帷幕可視邊界至內層網格尺寸線的模型間距，優先採用（DimensionType 的「輔助線長度」+ 圖紙 `3 mm`）乘以立面視圖比例；內層網格尺寸線至外層總尺寸線的模型間距，採用輔助線長度乘以立面視圖比例。只有無法讀取有效輔助線長度時，才分別使用 `dimensionOffsetMm`（預設模型距離 `300 mm`）與 `dimensionStackOffsetMm`（預設模型距離 `250 mm`）作為 fallback，並在回傳結果中說明來源與原因。即使某方向沒有足夠網格而略過網格尺寸，總尺寸仍保留在固定外層位置。
@@ -728,6 +785,24 @@ Reference 策略：
 - 回傳欄位會標示 `geometry_reference`、`detail_curve_fallback_from_curtain_grid_coordinates`、`skipped` 或 `failed`。
 
 除錯時使用 `diagnose_curtain_wall_elevation_dimensions`。預設 `rollback = true`，測試產生的尺寸、ReferencePlane 與 detail curve 都不會留在模型。應檢查 `AttemptedDimensions`、`VerifiedDimensionIds`、`OwnerViewId` 與 `Failures`，不要只依賴 API 未拋出例外就判定成功。
+
+
+### 樓層偏移尺寸 Runtime 回歸測試
+
+`testMode = "level_offset"` 必須指定 `wallId`，或在目標立面只選取一道 curtain wall；此模式禁止退回模型第一道帷幕牆。`viewId` 未提供時，目標視圖固定使用目前作用中的 elevation view。
+
+測試以 production crop、view frame、帷幕底／頂 geometry Reference、`wall.LevelId` 與解析後的 DimensionType／尺寸堆疊間距建立資料，並比較 target view 未啟用與啟用兩種狀態。每種狀態依序測試：
+
+- `Level.GetPlaneReference()` + 帷幕底的兩 Reference 尺寸。
+- Level + 帷幕底 + 帷幕頂的三 Reference 尺寸鏈。
+- `OST_InvisibleLines` 細部線 + 帷幕底的兩 Reference fallback。
+- 細部線 + 帷幕底 + 帷幕頂的三 Reference fallback 尺寸鏈。
+- 完整 production 建立與 post-commit repair 流程。
+
+每個 raw attempt 都在已 commit 的 inner transaction 後讀取 `AreReferencesAvailable`、Reference 數量與 segment values，並回傳 Reference element ID、`ElementReferenceType`、stable representation round-trip、OwnerViewId、線型 read-back、`PostCommitValidationMode`、例外與 `FailureStage`。production attempt 同步回傳 validation mode、預期／實際 segment values 與既有 `LevelOffsetDimension*` 診斷欄位。
+
+整個測試固定包在 outer `TransactionGroup` 並最終 rollback；呼叫端傳入的 `rollback` 不得關閉此保護。回傳 `RollbackCleanupPassed` 驗證所有暫時 Dimension 與 DetailCurve 已不存在。後續 production 修正只能依 `FirstFailure` 或 `FirstProductionFailure` 的第一個失敗 assertion 決定。
+
 
 
 ## Boundaries

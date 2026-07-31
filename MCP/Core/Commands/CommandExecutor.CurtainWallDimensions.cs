@@ -22,6 +22,8 @@ namespace RevitMCP.Core
             Document doc = _uiApp.ActiveUIDocument.Document;
             UIDocument uidoc = _uiApp.ActiveUIDocument;
             string testMode = parameters["testMode"]?.Value<string>()?.Trim().ToLowerInvariant() ?? "both";
+            if (testMode == "level_offset")
+                return DiagnoseCurtainWallElevationLevelOffsetRuntime(parameters);
             bool rollback = parameters["rollback"]?.Value<bool>() ?? true;
             double fallbackInnerOffsetFt = (parameters["dimensionOffsetMm"]?.Value<double>() ?? 300.0) / 304.8;
             double fallbackStackOffsetFt = (parameters["dimensionStackOffsetMm"]?.Value<double>() ?? 250.0) / 304.8;
@@ -117,8 +119,8 @@ namespace RevitMCP.Core
                         double yShift = sourceOriginDelta.DotProduct(frame.BasisY);
                         minX = (cropResult.WallBoundaryMinXFt ?? cropResult.View2DMin.X) + xShift;
                         maxX = (cropResult.WallBoundaryMaxXFt ?? cropResult.View2DMax.X) + xShift;
-                        minY = cropResult.View2DMin.Y + yShift;
-                        maxY = cropResult.View2DMax.Y + yShift;
+                        minY = (cropResult.CurtainGeometryMinYFt ?? cropResult.View2DMin.Y) + yShift;
+                        maxY = (cropResult.CurtainGeometryMaxYFt ?? cropResult.View2DMax.Y) + yShift;
                         topGridY = maxY + stackOffsetResolution.InnerOffsetFt;
                         topTotalY = topGridY + stackOffsetResolution.ResolvedOffsetFt;
                         leftGridX = minX - stackOffsetResolution.InnerOffsetFt;
@@ -433,10 +435,12 @@ namespace RevitMCP.Core
             public ElementId TotalWidthDimensionId { get; set; }
             public ElementId HorizontalGridDimensionId { get; set; }
             public ElementId TotalHeightDimensionId { get; set; }
+            public ElementId LevelOffsetDimensionElementId { get; set; }
             public ElementId VerticalGridDimensionId { get; set; }
             public bool? TotalWidthDimensionAreReferencesAvailable { get; set; }
             public bool? HorizontalGridDimensionAreReferencesAvailable { get; set; }
             public bool? TotalHeightDimensionAreReferencesAvailable { get; set; }
+            public bool? LevelOffsetDimensionAreReferencesAvailable { get; set; }
             public bool? VerticalGridDimensionAreReferencesAvailable { get; set; }
             public List<ElementId> ReferenceCurveIds { get; } = new List<ElementId>();
             public List<string> Warnings { get; } = new List<string>();
@@ -448,9 +452,13 @@ namespace RevitMCP.Core
             public List<string> GeometryReferenceCategories { get; set; } = new List<string>();
             public string TotalWidthDimensionReferenceSource { get; set; }
             public string TotalHeightDimensionReferenceSource { get; set; }
+            public string LevelOffsetDimensionReferenceSource { get; set; }
             public string HorizontalGridDimensionReferenceSource { get; set; }
             public string VerticalGridDimensionReferenceSource { get; set; }
             public string DimensionFallbackReason { get; set; }
+            public double? CurtainBottomToLevelDistanceFt { get; set; }
+            public string LevelOffsetDimensionMode { get; set; } = "not_available";
+            public string LevelOffsetDimensionStatus { get; set; } = "not_available";
             public double? DimensionWitnessLineLengthPaperFt { get; set; }
             public int DimensionViewScale { get; set; }
             public double DimensionInnerOffsetExtraPaperFt { get; set; }
@@ -482,6 +490,10 @@ namespace RevitMCP.Core
             public Wall Wall { get; set; }
             public CurtainElevationCropResult CropResult { get; set; }
             public CurtainElevationDimensionResult Result { get; set; }
+            public ElementId WallTagId { get; set; }
+            public string WallTagStatus { get; set; } = "pending";
+            public XYZ WallTagViewPosition { get; set; }
+            public XYZ WallTagWorldPosition { get; set; }
         }
         private class CurtainElevationGeometryReference
         {
@@ -543,6 +555,12 @@ namespace RevitMCP.Core
             public int? PostCommitReferenceCount { get; set; }
             public bool? PostCommitValidationPassed { get; set; }
             public string PostCommitFailureReason { get; set; }
+            public bool RecoverEnhancedTotalHeightAsSeparateDimensions { get; set; }
+            public List<double> RecoveryTotalHeightCoordinates { get; set; } = new List<double>();
+            public List<CurtainElevationGeometryReference> RecoveryTotalHeightReferences { get; set; } = new List<CurtainElevationGeometryReference>();
+            public List<double> RecoveryLevelOffsetCoordinates { get; set; } = new List<double>();
+            public List<CurtainElevationGeometryReference> RecoveryLevelOffsetReferences { get; set; } = new List<CurtainElevationGeometryReference>();
+            public double RecoveryLevelOffsetDimensionLineOffset { get; set; }
             public string FailureMessage { get; set; }
             public string ReferenceSource { get; set; }
             public int? ReferencePriorityProfile { get; set; }
@@ -592,6 +610,20 @@ namespace RevitMCP.Core
             public int? PostCommitReferenceCount { get; set; }
             public bool PostCommitValidationPassed { get; set; }
             public string PostCommitFailureReason { get; set; }
+            public string PostCommitValidationMode { get; set; }
+            public List<double> ExpectedSegmentValuesMm { get; set; } = new List<double>();
+            public List<double> ActualSegmentValuesMm { get; set; } = new List<double>();
+            public bool? SegmentValuesPassed { get; set; }
+            public bool RecoverEnhancedTotalHeightAsSeparateDimensions { get; set; }
+            public List<double> RecoveryTotalHeightCoordinates { get; set; } = new List<double>();
+            public List<CurtainElevationGeometryReference> RecoveryTotalHeightReferences { get; set; } = new List<CurtainElevationGeometryReference>();
+            public List<double> RecoveryLevelOffsetCoordinates { get; set; } = new List<double>();
+            public List<CurtainElevationGeometryReference> RecoveryLevelOffsetReferences { get; set; } = new List<CurtainElevationGeometryReference>();
+            public double RecoveryLevelOffsetDimensionLineOffset { get; set; }
+            public bool RecoverLevelOffsetWithInvisibleReference { get; set; }
+            public double RecoveryLevelY { get; set; }
+            public double RecoveryLevelReferenceMinX { get; set; }
+            public double RecoveryLevelReferenceMaxX { get; set; }
         }
 
 
@@ -748,8 +780,8 @@ namespace RevitMCP.Core
             double yShift = sourceOriginDelta.DotProduct(frame.BasisY);
             double minX = (cropResult.WallBoundaryMinXFt ?? cropResult.View2DMin.X) + xShift;
             double maxX = (cropResult.WallBoundaryMaxXFt ?? cropResult.View2DMax.X) + xShift;
-            double minY = cropResult.View2DMin.Y + yShift;
-            double maxY = cropResult.View2DMax.Y + yShift;
+            double minY = (cropResult.CurtainGeometryMinYFt ?? cropResult.View2DMin.Y) + yShift;
+            double maxY = (cropResult.CurtainGeometryMaxYFt ?? cropResult.View2DMax.Y) + yShift;
             if (maxX - minX <= 1e-6 || maxY - minY <= 1e-6)
             {
                 result.Status = "failed";
@@ -806,19 +838,24 @@ namespace RevitMCP.Core
             }
 
             List<CurtainElevationGeometryReference> totalHeightRefs = SelectCurtainElevationBoundaryReferences(geometryReferences, "vertical", minX, maxX, minY, maxY);
-            if (TryCreateCurtainElevationDimensionChain(doc, view, frame, dimensionType, "total_height", "vertical", new List<double> { minY, maxY }, totalHeightRefs, minX, maxX, leftTotalX, result, false, out ElementId totalHeightId, out string totalHeightSource, out string totalHeightReason))
-            {
-                result.TotalHeightDimensionId = totalHeightId;
-                result.TotalHeightDimensionAreReferencesAvailable = GetCurtainElevationDimensionReferencesAvailability(doc, totalHeightId);
-                result.TotalHeightDimensionReferenceSource = totalHeightSource;
-                result.CreatedCount++;
-            }
-            else
-            {
-                result.FailedCount++;
-                result.TotalHeightDimensionReferenceSource = "failed";
-                result.Warnings.Add("total height dimension failed: " + totalHeightReason);
-            }
+            double? levelY = cropResult.CropBottomLevelViewYFt.HasValue
+                ? cropResult.CropBottomLevelViewYFt.Value + yShift
+                : (double?)null;
+            CreateCurtainElevationTotalHeightAndLevelOffsetDimensions(
+                doc,
+                view,
+                wall,
+                frame,
+                dimensionType,
+                minX,
+                maxX,
+                minY,
+                maxY,
+                levelY,
+                leftTotalX,
+                stackOffsetResolution.ResolvedOffsetFt,
+                totalHeightRefs,
+                result);
 
             List<double> verticalGridXs = GetCurtainElevationGridCoordinates(doc, wall, frame, "vertical", minX, maxX, minY, maxY);
             if (verticalGridXs.Count >= 3)
@@ -875,6 +912,506 @@ namespace RevitMCP.Core
             return result;
         }
 
+        private void CreateCurtainElevationTotalHeightAndLevelOffsetDimensions(
+            Document doc,
+            View view,
+            Wall wall,
+            Transform frame,
+            DimensionType dimensionType,
+            double minX,
+            double maxX,
+            double minY,
+            double maxY,
+            double? levelY,
+            double leftTotalX,
+            double stackOffsetFt,
+            List<CurtainElevationGeometryReference> totalHeightReferences,
+            CurtainElevationDimensionResult result)
+        {
+            const double zeroToleranceFt = 1.0 / 304.8;
+            List<CurtainElevationGeometryReference> orderedHeightReferences = totalHeightReferences?
+                .Where(reference => reference?.Reference != null)
+                .OrderBy(reference => reference.CenterY)
+                .ToList() ?? new List<CurtainElevationGeometryReference>();
+
+            Level level = doc?.GetElement(wall?.LevelId) as Level;
+            if (!levelY.HasValue || level == null)
+            {
+                result.LevelOffsetDimensionMode = "skipped_level_unavailable";
+                result.LevelOffsetDimensionStatus = "skipped_level_unavailable";
+                result.Warnings.Add("level offset dimension skipped: wall Level or projected Level Y was unavailable; retained the original total height dimension.");
+                TryCreateCurtainElevationOriginalTotalHeightDimension(
+                    doc, view, frame, dimensionType, minX, maxX, minY, maxY,
+                    leftTotalX, orderedHeightReferences, result);
+                return;
+            }
+
+            double signedOffsetFt = minY - levelY.Value;
+            result.CurtainBottomToLevelDistanceFt = Math.Abs(signedOffsetFt);
+            if (Math.Abs(signedOffsetFt) <= zeroToleranceFt)
+            {
+                result.LevelOffsetDimensionMode = "skipped_zero_distance";
+                result.LevelOffsetDimensionStatus = "skipped_zero_distance";
+                TryCreateCurtainElevationOriginalTotalHeightDimension(
+                    doc, view, frame, dimensionType, minX, maxX, minY, maxY,
+                    leftTotalX, orderedHeightReferences, result);
+                return;
+            }
+
+            if (orderedHeightReferences.Count != 2)
+            {
+                result.LevelOffsetDimensionMode = "failed_missing_curtain_boundary_reference";
+                result.LevelOffsetDimensionStatus = "failed";
+                result.Warnings.Add("level offset dimension failed: curtain bottom/top geometry references were unavailable.");
+                TryCreateCurtainElevationOriginalTotalHeightDimension(
+                    doc, view, frame, dimensionType, minX, maxX, minY, maxY,
+                    leftTotalX, orderedHeightReferences, result);
+                return;
+            }
+
+            CurtainElevationGeometryReference levelReference;
+            doc.Regenerate();
+            if (!TryCreateCurtainElevationLevelPlaneReference(
+                doc, level, minX, maxX, levelY.Value,
+                out levelReference, out string levelPlaneReason))
+            {
+                if (!TryCreateCurtainElevationInvisibleLevelReference(
+                    doc, view, frame, minX, maxX, levelY.Value, result,
+                    out levelReference, out string fallbackReason))
+                {
+                    result.LevelOffsetDimensionMode = "failed_level_reference";
+                    result.LevelOffsetDimensionStatus = "failed";
+                    result.Warnings.Add($"level offset dimension could not resolve the Level plane Reference ({levelPlaneReason}) or invisible detail-curve fallback ({fallbackReason}); retained the original total height dimension.");
+                    TryCreateCurtainElevationOriginalTotalHeightDimension(
+                        doc, view, frame, dimensionType, minX, maxX, minY, maxY,
+                        leftTotalX, orderedHeightReferences, result);
+                    return;
+                }
+
+                result.Warnings.Add("Level plane Reference was unavailable; using an invisible detail-curve Level reference: " + levelPlaneReason);
+            }
+
+            List<double> levelOffsetCoordinates = new List<double> { minY, levelY.Value };
+            List<CurtainElevationGeometryReference> levelOffsetReferences = signedOffsetFt > 0
+                ? new List<CurtainElevationGeometryReference> { levelReference, orderedHeightReferences[0] }
+                : new List<CurtainElevationGeometryReference> { orderedHeightReferences[0], levelReference };
+            double separateDimensionX = leftTotalX - stackOffsetFt;
+
+            if (signedOffsetFt > zeroToleranceFt)
+            {
+                var enhancedCoordinates = new List<double> { levelY.Value, minY, maxY };
+                List<CurtainElevationGeometryReference> enhancedReferences = new List<CurtainElevationGeometryReference>
+                    { levelReference, orderedHeightReferences[0], orderedHeightReferences[1] };
+                bool enhancedCreated = TryCreateCurtainElevationDimensionChain(
+                    doc, view, frame, dimensionType, "total_height", "vertical",
+                    enhancedCoordinates, enhancedReferences, minX, maxX, leftTotalX,
+                    result, false, out ElementId enhancedId, out string enhancedSource, out string enhancedReason);
+
+                if (!enhancedCreated && levelReference.ReferenceSource == "wall_level_plane_reference")
+                {
+                    if (TryCreateCurtainElevationInvisibleLevelReference(
+                        doc, view, frame, minX, maxX, levelY.Value, result,
+                        out CurtainElevationGeometryReference invisibleLevelReference, out string invisibleReason))
+                    {
+                        levelReference = invisibleLevelReference;
+                        enhancedReferences = new List<CurtainElevationGeometryReference>
+                            { levelReference, orderedHeightReferences[0], orderedHeightReferences[1] };
+                        enhancedCreated = TryCreateCurtainElevationDimensionChain(
+                            doc, view, frame, dimensionType, "total_height", "vertical",
+                            enhancedCoordinates, enhancedReferences, minX, maxX, leftTotalX,
+                            result, false, out enhancedId, out enhancedSource, out string fallbackEnhancedReason);
+                        if (!enhancedCreated)
+                            enhancedReason = AppendCurtainElevationWarning(enhancedReason, "invisible Level reference: " + fallbackEnhancedReason);
+                    }
+                    else
+                    {
+                        enhancedReason = AppendCurtainElevationWarning(enhancedReason, "invisible Level reference creation failed: " + invisibleReason);
+                    }
+                }
+
+                if (enhancedCreated)
+                {
+                    result.TotalHeightDimensionId = enhancedId;
+                    result.TotalHeightDimensionAreReferencesAvailable = GetCurtainElevationDimensionReferencesAvailability(doc, enhancedId);
+                    result.TotalHeightDimensionReferenceSource = enhancedSource;
+                    result.LevelOffsetDimensionElementId = enhancedId;
+                    result.LevelOffsetDimensionAreReferencesAvailable = result.TotalHeightDimensionAreReferencesAvailable;
+                    result.LevelOffsetDimensionReferenceSource = enhancedSource;
+                    result.LevelOffsetDimensionMode = "total_height_chain";
+                    result.LevelOffsetDimensionStatus = "created";
+                    result.CreatedCount++;
+
+                    CurtainElevationPendingDimension pending = result.PendingNativeDimensions
+                        .LastOrDefault(candidate => candidate.NativeDimensionId == enhancedId);
+                    if (pending != null)
+                    {
+                        pending.RecoverEnhancedTotalHeightAsSeparateDimensions = true;
+                        pending.RecoveryTotalHeightCoordinates = new List<double> { minY, maxY };
+                        pending.RecoveryTotalHeightReferences = orderedHeightReferences.ToList();
+                        levelOffsetReferences = signedOffsetFt > 0
+                            ? new List<CurtainElevationGeometryReference> { levelReference, orderedHeightReferences[0] }
+                            : new List<CurtainElevationGeometryReference> { orderedHeightReferences[0], levelReference };
+                        pending.RecoveryLevelOffsetCoordinates = levelOffsetCoordinates;
+                        pending.RecoveryLevelOffsetReferences = levelOffsetReferences;
+                        pending.RecoveryLevelOffsetDimensionLineOffset = separateDimensionX;
+                        ConfigureCurtainElevationLevelReferenceRecovery(pending, levelReference, levelY.Value, minX, maxX);
+                    }
+                    return;
+                }
+
+                result.Warnings.Add("enhanced total height dimension failed; falling back to original total height plus a separate level offset dimension: " + enhancedReason);
+                result.LevelOffsetDimensionMode = "separate_outer_fallback";
+            }
+            else
+            {
+                result.LevelOffsetDimensionMode = "separate_outer_below_level";
+            }
+
+            levelOffsetReferences = signedOffsetFt > 0
+                ? new List<CurtainElevationGeometryReference> { levelReference, orderedHeightReferences[0] }
+                : new List<CurtainElevationGeometryReference> { orderedHeightReferences[0], levelReference };
+            TryCreateCurtainElevationOriginalTotalHeightDimension(
+                doc, view, frame, dimensionType, minX, maxX, minY, maxY,
+                leftTotalX, orderedHeightReferences, result);
+            TryCreateCurtainElevationSeparateLevelOffsetDimension(
+                doc, view, frame, dimensionType, minX, maxX,
+                levelOffsetCoordinates, levelOffsetReferences, separateDimensionX,
+                levelY.Value, result);
+        }
+        private bool TryCreateCurtainElevationLevelPlaneReference(
+            Document doc,
+            Level level,
+            double minX,
+            double maxX,
+            double levelY,
+            out CurtainElevationGeometryReference levelReference,
+            out string reason)
+        {
+            levelReference = null;
+            reason = null;
+            try
+            {
+                Reference reference = level?.GetPlaneReference();
+                if (reference == null)
+                {
+                    reason = "Level.GetPlaneReference() returned null.";
+                    return false;
+                }
+
+                if (!TryValidateCurtainElevationStableReference(
+                    doc, reference, level.Id, out string stableRepresentation, out reason))
+                {
+                    return false;
+                }
+
+                levelReference = new CurtainElevationGeometryReference
+                {
+                    Reference = reference,
+                    ElementId = level.Id,
+                    CategoryName = level.Category?.Name,
+                    MinX = minX,
+                    MaxX = maxX,
+                    MinY = levelY,
+                    MaxY = levelY,
+                    Length = Math.Max(maxX - minX, 0.0),
+                    IsHorizontal = true,
+                    StableRepresentation = stableRepresentation,
+                    ReferenceSource = "wall_level_plane_reference"
+                };
+                return true;
+            }
+            catch (Exception ex)
+            {
+                reason = ex.Message;
+                return false;
+            }
+        }
+
+        private bool TryCreateCurtainElevationInvisibleLevelReference(
+            Document doc,
+            View view,
+            Transform frame,
+            double minX,
+            double maxX,
+            double levelY,
+            CurtainElevationDimensionResult result,
+            out CurtainElevationGeometryReference levelReference,
+            out string reason)
+        {
+            levelReference = null;
+            reason = null;
+            DetailCurve detailCurve = null;
+            try
+            {
+                GraphicsStyle invisibleLineStyle = TryFindCurtainElevationLevelInvisibleLineStyle(doc);
+                if (invisibleLineStyle == null)
+                {
+                    reason = "BuiltInCategory.OST_InvisibleLines was unavailable.";
+                    return false;
+                }
+
+                double lineMinX = minX;
+                double lineMaxX = maxX;
+                if (Math.Abs(lineMaxX - lineMinX) < 1e-6)
+                    lineMaxX = lineMinX + (100.0 / 304.8);
+                Line referenceLine = Line.CreateBound(
+                    CurtainElevationPointAt2D(frame, lineMinX, levelY),
+                    CurtainElevationPointAt2D(frame, lineMaxX, levelY));
+                detailCurve = doc.Create.NewDetailCurve(view, referenceLine);
+                if (detailCurve == null)
+                {
+                    reason = "Revit returned null DetailCurve for the Level fallback.";
+                    return false;
+                }
+
+                detailCurve.LineStyle = invisibleLineStyle;
+                if (detailCurve.LineStyle == null ||
+                    detailCurve.LineStyle.Id.GetIdValue() != invisibleLineStyle.Id.GetIdValue())
+                {
+                    throw new InvalidOperationException("Invisible Level detail curve line style read-back failed.");
+                }
+                doc.Regenerate();
+                Reference reference = detailCurve.GeometryCurve?.Reference;
+                if (reference == null)
+                    throw new InvalidOperationException("Invisible Level detail curve exposed no geometry Reference.");
+                if (!TryValidateCurtainElevationStableReference(
+                    doc, reference, detailCurve.Id, out string stableRepresentation, out reason))
+                {
+                    throw new InvalidOperationException(reason);
+                }
+
+                levelReference = new CurtainElevationGeometryReference
+                {
+                    Reference = reference,
+                    ElementId = detailCurve.Id,
+                    CategoryName = detailCurve.Category?.Name,
+                    MinX = lineMinX,
+                    MaxX = lineMaxX,
+                    MinY = levelY,
+                    MaxY = levelY,
+                    Length = Math.Abs(lineMaxX - lineMinX),
+                    IsHorizontal = true,
+                    StableRepresentation = stableRepresentation,
+                    ReferenceSource = "invisible_detail_curve_fallback"
+                };
+                if (!result.ReferenceCurveIds.Any(id => id == detailCurve.Id))
+                    result.ReferenceCurveIds.Add(detailCurve.Id);
+                return true;
+            }
+            catch (Exception ex)
+            {
+                reason = ex.Message;
+                if (detailCurve != null)
+                    DeleteCurtainElevationDetailCurves(doc, new[] { detailCurve });
+                return false;
+            }
+        }
+
+        private bool TryValidateCurtainElevationStableReference(
+            Document doc,
+            Reference reference,
+            ElementId expectedElementId,
+            out string stableRepresentation,
+            out string reason)
+        {
+            stableRepresentation = null;
+            reason = null;
+            try
+            {
+                if (doc == null || reference == null || expectedElementId == null)
+                {
+                    reason = "Reference validation inputs were incomplete.";
+                    return false;
+                }
+
+                stableRepresentation = reference.ConvertToStableRepresentation(doc);
+                if (string.IsNullOrWhiteSpace(stableRepresentation))
+                {
+                    reason = "Reference stable representation was empty.";
+                    return false;
+                }
+
+                Reference roundTripReference = Reference.ParseFromStableRepresentation(
+                    doc, stableRepresentation);
+                if (roundTripReference == null)
+                {
+                    reason = "Reference stable representation did not round-trip.";
+                    return false;
+                }
+                if (roundTripReference.ElementId == null ||
+                    roundTripReference.ElementId.GetIdValue() != expectedElementId.GetIdValue())
+                {
+                    reason = "Reference stable representation resolved to an unexpected element.";
+                    return false;
+                }
+
+                return true;
+            }
+            catch (Exception ex)
+            {
+                reason = ex.Message;
+                return false;
+            }
+        }
+
+        private void ConfigureCurtainElevationLevelReferenceRecovery(
+            CurtainElevationPendingDimension pending,
+            CurtainElevationGeometryReference levelReference,
+            double levelY,
+            double minX,
+            double maxX)
+        {
+            if (pending == null || levelReference?.ReferenceSource != "wall_level_plane_reference")
+                return;
+
+            pending.RecoverLevelOffsetWithInvisibleReference = true;
+            pending.RecoveryLevelY = levelY;
+            pending.RecoveryLevelReferenceMinX = minX;
+            pending.RecoveryLevelReferenceMaxX = maxX;
+        }
+
+        private List<CurtainElevationGeometryReference> ReplaceCurtainElevationLevelReference(
+            IEnumerable<CurtainElevationGeometryReference> references,
+            CurtainElevationGeometryReference replacement)
+        {
+            return references?.Select(reference =>
+                reference?.ReferenceSource == "wall_level_plane_reference"
+                    ? replacement
+                    : reference).ToList() ?? new List<CurtainElevationGeometryReference>();
+        }
+
+        private void DeleteCurtainElevationInvisibleLevelReference(
+            Document doc,
+            CurtainElevationDimensionResult result,
+            CurtainElevationGeometryReference reference)
+        {
+            if (doc == null || reference?.ReferenceSource != "invisible_detail_curve_fallback" ||
+                reference.ElementId == null || reference.ElementId == ElementId.InvalidElementId)
+            {
+                return;
+            }
+
+            ElementId referenceId = reference.ElementId;
+            if (doc.GetElement(referenceId) != null)
+                doc.Delete(referenceId);
+            result?.ReferenceCurveIds.RemoveAll(id =>
+                id != null && id.GetIdValue() == referenceId.GetIdValue());
+        }
+
+
+        private bool TryCreateCurtainElevationOriginalTotalHeightDimension(
+            Document doc,
+            View view,
+            Transform frame,
+            DimensionType dimensionType,
+            double minX,
+            double maxX,
+            double minY,
+            double maxY,
+            double leftTotalX,
+            List<CurtainElevationGeometryReference> totalHeightReferences,
+            CurtainElevationDimensionResult result)
+        {
+            if (TryCreateCurtainElevationDimensionChain(
+                doc, view, frame, dimensionType, "total_height", "vertical",
+                new List<double> { minY, maxY }, totalHeightReferences,
+                minX, maxX, leftTotalX, result, false,
+                out ElementId totalHeightId, out string totalHeightSource, out string totalHeightReason))
+            {
+                result.TotalHeightDimensionId = totalHeightId;
+                result.TotalHeightDimensionAreReferencesAvailable = GetCurtainElevationDimensionReferencesAvailability(doc, totalHeightId);
+                result.TotalHeightDimensionReferenceSource = totalHeightSource;
+                result.CreatedCount++;
+                return true;
+            }
+
+            result.FailedCount++;
+            result.TotalHeightDimensionReferenceSource = "failed";
+            result.Warnings.Add("total height dimension failed: " + totalHeightReason);
+            return false;
+        }
+
+        private bool TryCreateCurtainElevationSeparateLevelOffsetDimension(
+            Document doc,
+            View view,
+            Transform frame,
+            DimensionType dimensionType,
+            double minX,
+            double maxX,
+            List<double> coordinates,
+            List<CurtainElevationGeometryReference> references,
+            double dimensionLineX,
+            double levelY,
+            CurtainElevationDimensionResult result)
+        {
+            List<CurtainElevationGeometryReference> workingReferences = references?.ToList();
+            bool created = TryCreateCurtainElevationDimensionChain(
+                doc, view, frame, dimensionType, "level_offset", "vertical",
+                coordinates, workingReferences, minX, maxX, dimensionLineX,
+                result, false, out ElementId levelOffsetId, out string levelOffsetSource, out string levelOffsetReason);
+
+            if (!created && workingReferences?.Any(reference =>
+                reference?.ReferenceSource == "wall_level_plane_reference") == true)
+            {
+                if (TryCreateCurtainElevationInvisibleLevelReference(
+                    doc, view, frame, minX, maxX, levelY, result,
+                    out CurtainElevationGeometryReference invisibleLevelReference, out string invisibleReason))
+                {
+                    workingReferences = ReplaceCurtainElevationLevelReference(
+                        workingReferences, invisibleLevelReference);
+                    created = TryCreateCurtainElevationDimensionChain(
+                        doc, view, frame, dimensionType, "level_offset", "vertical",
+                        coordinates, workingReferences, minX, maxX, dimensionLineX,
+                        result, false, out levelOffsetId, out levelOffsetSource, out string fallbackReason);
+                    if (!created)
+                    {
+                        levelOffsetReason = AppendCurtainElevationWarning(
+                            levelOffsetReason, "invisible Level reference: " + fallbackReason);
+                        DeleteCurtainElevationInvisibleLevelReference(
+                            doc, result, invisibleLevelReference);
+                    }
+                }
+                else
+                {
+                    levelOffsetReason = AppendCurtainElevationWarning(
+                        levelOffsetReason, "invisible Level reference creation failed: " + invisibleReason);
+                }
+            }
+
+            if (created)
+            {
+                result.LevelOffsetDimensionElementId = levelOffsetId;
+                result.LevelOffsetDimensionAreReferencesAvailable = GetCurtainElevationDimensionReferencesAvailability(doc, levelOffsetId);
+                result.LevelOffsetDimensionReferenceSource = levelOffsetSource;
+                result.LevelOffsetDimensionStatus = "created";
+                result.CreatedCount++;
+                CurtainElevationPendingDimension pending = result.PendingNativeDimensions
+                    .LastOrDefault(candidate => candidate.NativeDimensionId == levelOffsetId);
+                if (pending != null)
+                {
+                    pending.RecoveryLevelOffsetCoordinates = coordinates.ToList();
+                    pending.RecoveryLevelOffsetReferences = workingReferences.ToList();
+                    pending.RecoveryLevelOffsetDimensionLineOffset = dimensionLineX;
+                    ConfigureCurtainElevationLevelReferenceRecovery(
+                        pending, workingReferences?.FirstOrDefault(reference =>
+                            reference?.ReferenceSource == "wall_level_plane_reference"),
+                        levelY, minX, maxX);
+                }
+                return true;
+            }
+            CurtainElevationGeometryReference failedInvisibleReference = workingReferences?
+                .FirstOrDefault(reference => reference?.ReferenceSource == "invisible_detail_curve_fallback");
+            DeleteCurtainElevationInvisibleLevelReference(doc, result, failedInvisibleReference);
+            result.LevelOffsetDimensionElementId = null;
+            result.LevelOffsetDimensionAreReferencesAvailable = false;
+            result.LevelOffsetDimensionReferenceSource = "failed";
+            result.LevelOffsetDimensionStatus = "failed";
+            result.FailedCount++;
+            result.Warnings.Add("level offset dimension failed: " + levelOffsetReason);
+            return false;
+        }
+
+
         private bool CurtainElevationGridDimensionsUseNativeReferences(CurtainElevationDimensionResult result)
         {
             if (result == null)
@@ -900,6 +1437,7 @@ namespace RevitMCP.Core
             {
                 result.TotalWidthDimensionId,
                 result.TotalHeightDimensionId,
+                result.LevelOffsetDimensionElementId,
                 result.HorizontalGridDimensionId,
                 result.VerticalGridDimensionId
             };
@@ -1010,11 +1548,12 @@ namespace RevitMCP.Core
                 result.TotalWidthDimensionId,
                 result.HorizontalGridDimensionId,
                 result.TotalHeightDimensionId,
+                result.LevelOffsetDimensionElementId,
                 result.VerticalGridDimensionId
             };
 
             result.VerifiedCount = 0;
-            foreach (ElementId id in ids)
+            foreach (ElementId id in ids.Distinct())
             {
                 if (id == null || id == ElementId.InvalidElementId)
                     continue;
@@ -1045,6 +1584,138 @@ namespace RevitMCP.Core
         }
 
 
+        private bool TryRecoverEnhancedCurtainElevationTotalHeightDimension(
+            Document doc,
+            CurtainElevationDimensionResult result,
+            CurtainElevationPendingDimension pending,
+            out string reason)
+        {
+            reason = null;
+            if (pending?.RecoveryTotalHeightCoordinates == null ||
+                pending.RecoveryTotalHeightReferences == null ||
+                pending.RecoveryLevelOffsetCoordinates == null ||
+                pending.RecoveryLevelOffsetReferences == null)
+            {
+                reason = "recovery inputs were unavailable.";
+                return false;
+            }
+
+            if (!TryCreateCurtainElevationGeometryReferenceDimension(
+                doc, pending.View, pending.Frame, pending.DimensionType, "vertical",
+                pending.RecoveryTotalHeightCoordinates, pending.RecoveryTotalHeightReferences,
+                pending.DimensionLineOffset, out ElementId totalHeightId,
+                out bool? totalHeightReferencesAvailable, out string totalHeightReason))
+            {
+                reason = "original total height recovery failed: " + totalHeightReason;
+                return false;
+            }
+
+            result.TotalHeightDimensionId = totalHeightId;
+            result.TotalHeightDimensionAreReferencesAvailable = totalHeightReferencesAvailable;
+            result.TotalHeightDimensionReferenceSource = ResolveCurtainElevationDimensionReferenceSource(
+                pending.RecoveryTotalHeightReferences);
+            result.LevelOffsetDimensionElementId = null;
+            result.LevelOffsetDimensionAreReferencesAvailable = null;
+            result.LevelOffsetDimensionReferenceSource = null;
+            result.LevelOffsetDimensionMode = "separate_outer_post_commit_fallback";
+
+            List<CurtainElevationGeometryReference> recoveryLevelOffsetReferences =
+                pending.RecoveryLevelOffsetReferences.ToList();
+            CurtainElevationGeometryReference recoveryInvisibleReference = null;
+            if (pending.RecoverLevelOffsetWithInvisibleReference)
+            {
+                if (!TryCreateCurtainElevationInvisibleLevelReference(
+                    doc, pending.View, pending.Frame,
+                    pending.RecoveryLevelReferenceMinX, pending.RecoveryLevelReferenceMaxX,
+                    pending.RecoveryLevelY, result,
+                    out recoveryInvisibleReference, out string invisibleReason))
+                {
+                    result.LevelOffsetDimensionStatus = "failed";
+                    result.LevelOffsetDimensionAreReferencesAvailable = false;
+                    result.LevelOffsetDimensionReferenceSource = "failed";
+                    result.FailedCount++;
+                    result.Warnings.Add("level offset post-commit fallback could not create an invisible Level reference: " + invisibleReason);
+                    reason = "original total height recovered, but invisible Level reference creation failed: " + invisibleReason;
+                    return true;
+                }
+
+                recoveryLevelOffsetReferences = ReplaceCurtainElevationLevelReference(
+                    recoveryLevelOffsetReferences, recoveryInvisibleReference);
+            }
+
+            if (TryCreateCurtainElevationGeometryReferenceDimension(
+                doc, pending.View, pending.Frame, pending.DimensionType, "vertical",
+                pending.RecoveryLevelOffsetCoordinates, recoveryLevelOffsetReferences,
+                pending.RecoveryLevelOffsetDimensionLineOffset, out ElementId levelOffsetId,
+                out bool? levelOffsetReferencesAvailable, out string levelOffsetReason))
+            {
+                result.LevelOffsetDimensionElementId = levelOffsetId;
+                result.LevelOffsetDimensionAreReferencesAvailable = levelOffsetReferencesAvailable;
+                result.LevelOffsetDimensionReferenceSource = ResolveCurtainElevationDimensionReferenceSource(
+                    recoveryLevelOffsetReferences);
+                result.LevelOffsetDimensionStatus = "created_post_commit_fallback";
+                result.CreatedCount++;
+                return true;
+            }
+
+            DeleteCurtainElevationInvisibleLevelReference(doc, result, recoveryInvisibleReference);
+            result.LevelOffsetDimensionStatus = "failed";
+            result.LevelOffsetDimensionAreReferencesAvailable = false;
+            result.LevelOffsetDimensionReferenceSource = "failed";
+            result.FailedCount++;
+            result.Warnings.Add("level offset post-commit fallback failed: " + levelOffsetReason);
+            reason = "original total height recovered, but separate level offset failed: " + levelOffsetReason;
+            return true;
+        }
+        private bool TryRecoverCurtainElevationLevelOffsetWithInvisibleReference(
+            Document doc,
+            CurtainElevationDimensionResult result,
+            CurtainElevationPendingDimension pending,
+            out string reason)
+        {
+            reason = null;
+            if (pending?.RecoveryLevelOffsetCoordinates == null ||
+                pending.RecoveryLevelOffsetReferences == null)
+            {
+                reason = "level offset recovery inputs were unavailable.";
+                return false;
+            }
+
+            if (!TryCreateCurtainElevationInvisibleLevelReference(
+                doc, pending.View, pending.Frame,
+                pending.RecoveryLevelReferenceMinX, pending.RecoveryLevelReferenceMaxX,
+                pending.RecoveryLevelY, result,
+                out CurtainElevationGeometryReference invisibleReference,
+                out string invisibleReason))
+            {
+                reason = "invisible Level reference creation failed: " + invisibleReason;
+                return false;
+            }
+
+            List<CurtainElevationGeometryReference> recoveryReferences =
+                ReplaceCurtainElevationLevelReference(
+                    pending.RecoveryLevelOffsetReferences, invisibleReference);
+            if (!TryCreateCurtainElevationGeometryReferenceDimension(
+                doc, pending.View, pending.Frame, pending.DimensionType, "vertical",
+                pending.RecoveryLevelOffsetCoordinates, recoveryReferences,
+                pending.RecoveryLevelOffsetDimensionLineOffset,
+                out ElementId dimensionId, out bool? referencesAvailable,
+                out string dimensionReason))
+            {
+                DeleteCurtainElevationInvisibleLevelReference(
+                    doc, result, invisibleReference);
+                reason = "invisible Level reference dimension failed: " + dimensionReason;
+                return false;
+            }
+
+            result.LevelOffsetDimensionElementId = dimensionId;
+            result.LevelOffsetDimensionAreReferencesAvailable = referencesAvailable;
+            result.LevelOffsetDimensionReferenceSource = "invisible_detail_curve_fallback";
+            result.LevelOffsetDimensionStatus = "created_post_commit_fallback";
+            reason = "recovered with invisible_detail_curve_fallback.";
+            return true;
+        }
+
         private void FinalizeCurtainElevationDimensionsAfterCommit(
             Document doc,
             IEnumerable<CurtainElevationDimensionResult> dimensionResults)
@@ -1062,6 +1733,8 @@ namespace RevitMCP.Core
                     string failureReason = null;
                     int? referenceCount = null;
                     bool? referencesAvailable = null;
+                    bool isLevelOffsetPlane = IsCurtainElevationLevelOffsetPlanePending(pending);
+                    string validationMode = "failed";
 
                     try
                     {
@@ -1078,10 +1751,31 @@ namespace RevitMCP.Core
                         {
                             referencesAvailable = dimension.AreReferencesAvailable;
                             referenceCount = dimension.References?.Size ?? 0;
+                            if (isLevelOffsetPlane)
+                            {
+                                pending.ExpectedSegmentValuesMm =
+                                    GetCurtainElevationExpectedSegmentValuesMm(pending.Coordinates);
+                                pending.ActualSegmentValuesMm =
+                                    GetCurtainElevationDimensionValuesMm(dimension);
+                                pending.SegmentValuesPassed = CurtainElevationSegmentValuesMatch(
+                                    pending.ExpectedSegmentValuesMm,
+                                    pending.ActualSegmentValuesMm,
+                                    0.5);
+                            }
+
                             if (referencesAvailable != true)
-                                failureReason = "AreReferencesAvailable is not true after commit in the active owner view.";
+                            {
+                                if (isLevelOffsetPlane &&
+                                    referenceCount == pending.ExpectedReferenceCount &&
+                                    pending.SegmentValuesPassed == true)
+                                    validationMode = "level_plane_segment_validation";
+                                else
+                                    failureReason = "AreReferencesAvailable is not true after commit in the active owner view.";
+                            }
                             else if (referenceCount != pending.ExpectedReferenceCount)
                                 failureReason = $"Reference count is {referenceCount ?? 0}, expected {pending.ExpectedReferenceCount}.";
+                            else
+                                validationMode = "strict_references_available";
                         }
                     }
                     catch (Exception ex)
@@ -1093,6 +1787,7 @@ namespace RevitMCP.Core
                     pending.PostCommitReferenceCount = referenceCount;
                     pending.PostCommitValidationPassed = string.IsNullOrWhiteSpace(failureReason);
                     pending.PostCommitFailureReason = failureReason;
+                    pending.PostCommitValidationMode = validationMode;
                     result.PostCommitDimensionValidation.Add(new
                     {
                         WallId = result.WallId?.GetIdValue(),
@@ -1105,12 +1800,16 @@ namespace RevitMCP.Core
                         PostCommitReferenceCount = pending.PostCommitReferenceCount,
                         PostCommitValidationPassed = pending.PostCommitValidationPassed,
                         PostCommitFailureReason = pending.PostCommitFailureReason,
+                        PostCommitValidationMode = pending.PostCommitValidationMode,
+                        ExpectedSegmentValuesMm = pending.ExpectedSegmentValuesMm,
+                        ActualSegmentValuesMm = pending.ActualSegmentValuesMm,
+                        SegmentValuesPassed = pending.SegmentValuesPassed,
                         NativeReferenceSource = GetCurtainElevationDimensionReferenceSource(result, pending.Kind)
                     });
 
                     if (pending.PostCommitValidationPassed)
                     {
-                        SetCurtainElevationDimensionAvailability(result, pending.Kind, true);
+                        SetCurtainElevationDimensionAvailability(result, pending.Kind, referencesAvailable);
                     }
                     else
                     {
@@ -1138,6 +1837,30 @@ namespace RevitMCP.Core
                             }
 
                             string failurePrefix = $"{pending.Kind} native dimension failed post-commit validation: {pending.PostCommitFailureReason}";
+                            if (pending.RecoverEnhancedTotalHeightAsSeparateDimensions &&
+                                TryRecoverEnhancedCurtainElevationTotalHeightDimension(
+                                    doc, result, pending, out string enhancedRecoveryReason))
+                            {
+                                result.DimensionFallbackReason = AppendCurtainElevationWarning(
+                                    result.DimensionFallbackReason,
+                                    failurePrefix + " Recovered as original total height plus a separate level offset dimension. " + enhancedRecoveryReason);
+                                continue;
+                            }
+                            if (pending.RecoverLevelOffsetWithInvisibleReference)
+                            {
+                                if (TryRecoverCurtainElevationLevelOffsetWithInvisibleReference(
+                                    doc, result, pending, out string levelRecoveryReason))
+                                {
+                                    result.DimensionFallbackReason = AppendCurtainElevationWarning(
+                                        result.DimensionFallbackReason,
+                                        failurePrefix + " " + levelRecoveryReason);
+                                    continue;
+                                }
+
+                                failurePrefix = AppendCurtainElevationWarning(
+                                    failurePrefix, levelRecoveryReason);
+                            }
+
                             result.DimensionFallbackReason = AppendCurtainElevationWarning(result.DimensionFallbackReason, failurePrefix);
                             string fallbackReason = null;
                             if (pending.AllowDetailCurveFallback &&
@@ -1193,6 +1916,13 @@ namespace RevitMCP.Core
                             item.Pending.Kind,
                             GetCurtainElevationDimensionReferencesAvailability(doc, finalDimensionId));
                     }
+
+                    ElementId levelOffsetDimensionId = item.Result.LevelOffsetDimensionElementId;
+                    if (levelOffsetDimensionId != null && levelOffsetDimensionId != ElementId.InvalidElementId)
+                    {
+                        item.Result.LevelOffsetDimensionAreReferencesAvailable =
+                            GetCurtainElevationDimensionReferencesAvailability(doc, levelOffsetDimensionId);
+                    }
                 }
             }
 
@@ -1209,6 +1939,7 @@ namespace RevitMCP.Core
         {
             if (kind == "total_width") return result.TotalWidthDimensionId;
             if (kind == "total_height") return result.TotalHeightDimensionId;
+            if (kind == "level_offset") return result.LevelOffsetDimensionElementId;
             if (kind == "horizontal_grid") return result.HorizontalGridDimensionId;
             if (kind == "vertical_grid") return result.VerticalGridDimensionId;
             return null;
@@ -1218,6 +1949,7 @@ namespace RevitMCP.Core
         {
             if (kind == "total_width") return result.TotalWidthDimensionReferenceSource;
             if (kind == "total_height") return result.TotalHeightDimensionReferenceSource;
+            if (kind == "level_offset") return result.LevelOffsetDimensionReferenceSource;
             if (kind == "horizontal_grid") return result.HorizontalGridDimensionReferenceSource;
             if (kind == "vertical_grid") return result.VerticalGridDimensionReferenceSource;
             return null;
@@ -1227,6 +1959,7 @@ namespace RevitMCP.Core
         {
             if (kind == "total_width") result.TotalWidthDimensionAreReferencesAvailable = available;
             else if (kind == "total_height") result.TotalHeightDimensionAreReferencesAvailable = available;
+            else if (kind == "level_offset") result.LevelOffsetDimensionAreReferencesAvailable = available;
             else if (kind == "horizontal_grid") result.HorizontalGridDimensionAreReferencesAvailable = available;
             else if (kind == "vertical_grid") result.VerticalGridDimensionAreReferencesAvailable = available;
         }
@@ -1245,8 +1978,24 @@ namespace RevitMCP.Core
             }
             else if (kind == "total_height")
             {
+                ElementId previousTotalHeightId = result.TotalHeightDimensionId;
                 result.TotalHeightDimensionId = dimensionId;
                 result.TotalHeightDimensionReferenceSource = referenceSource;
+                if (previousTotalHeightId != null &&
+                    result.LevelOffsetDimensionElementId != null &&
+                    previousTotalHeightId.GetIdValue() == result.LevelOffsetDimensionElementId.GetIdValue())
+                {
+                    result.LevelOffsetDimensionElementId = dimensionId;
+                    result.LevelOffsetDimensionReferenceSource = referenceSource;
+                    result.LevelOffsetDimensionAreReferencesAvailable = available;
+                    if (dimensionId == null || dimensionId == ElementId.InvalidElementId)
+                        result.LevelOffsetDimensionStatus = "failed";
+                }
+            }
+            else if (kind == "level_offset")
+            {
+                result.LevelOffsetDimensionElementId = dimensionId;
+                result.LevelOffsetDimensionReferenceSource = referenceSource;
             }
             else if (kind == "horizontal_grid")
             {
@@ -1507,6 +2256,36 @@ namespace RevitMCP.Core
                 // Dimension values are best-effort diagnostics only.
             }
             return values;
+        }
+        private bool IsCurtainElevationLevelOffsetPlanePending(
+            CurtainElevationPendingDimension pending)
+        {
+            return pending != null &&
+                pending.NativeReferenceSource == "wall_level_plane_reference" &&
+                (pending.Kind == "level_offset" ||
+                    (pending.Kind == "total_height" &&
+                        pending.RecoverEnhancedTotalHeightAsSeparateDimensions));
+        }
+
+        private List<double> GetCurtainElevationExpectedSegmentValuesMm(
+            IList<double> coordinates)
+        {
+            if (coordinates == null || coordinates.Count < 2)
+                return new List<double>();
+
+            return coordinates.Zip(
+                coordinates.Skip(1),
+                (start, end) => Math.Round(Math.Abs(end - start) * 304.8, 4)).ToList();
+        }
+
+        private bool CurtainElevationSegmentValuesMatch(
+            IList<double> expected,
+            IList<double> actual,
+            double toleranceMm = 0.5)
+        {
+            return expected != null && actual != null && expected.Count == actual.Count &&
+                expected.Zip(actual, (left, right) => Math.Abs(left - right) <= toleranceMm)
+                    .All(matches => matches);
         }
         private CurtainElevationDimensionReferenceState CaptureCurtainElevationDimensionReferenceState(
             Document doc,
@@ -1773,6 +2552,12 @@ namespace RevitMCP.Core
                 .Where(reference => reference != null)
                 .ToList() ?? new List<CurtainElevationGeometryReference>();
 
+            if (references.Any(reference => reference.ReferenceSource == "invisible_detail_curve_fallback"))
+                return "invisible_detail_curve_fallback";
+
+            if (references.Any(reference => reference.ReferenceSource == "wall_level_plane_reference"))
+                return "wall_level_plane_reference";
+
             if (references.Any(reference =>
                 reference.ReferenceSource == "curtain_grid_internal_geometry_reference"))
             {
@@ -1824,6 +2609,33 @@ namespace RevitMCP.Core
                 return false;
             }
         }
+
+        private GraphicsStyle TryFindCurtainElevationLevelInvisibleLineStyle(Document doc)
+        {
+            GraphicsStyle existingStyle = TryFindExistingInvisibleLineStyle(doc);
+            if (existingStyle != null || doc == null)
+                return existingStyle;
+
+            try
+            {
+                IdType invisibleCategoryId =
+                    new ElementId(BuiltInCategory.OST_InvisibleLines).GetIdValue();
+                return new FilteredElementCollector(doc)
+                    .OfClass(typeof(GraphicsStyle))
+                    .Cast<GraphicsStyle>()
+                    .FirstOrDefault(style =>
+                        style != null &&
+                        style.GraphicsStyleType == GraphicsStyleType.Projection &&
+                        style.GraphicsStyleCategory?.Id != null &&
+                        style.GraphicsStyleCategory.Id.GetIdValue() == invisibleCategoryId);
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+
 
         private GraphicsStyle TryFindExistingInvisibleLineStyle(Document doc)
         {
@@ -1898,9 +2710,17 @@ namespace RevitMCP.Core
             dimensionId = null;
             reason = null;
             var createdReferenceCurves = new List<DetailCurve>();
+            ElementId createdDimensionId = null;
 
             try
             {
+                GraphicsStyle invisibleLineStyle = TryFindExistingInvisibleLineStyle(doc);
+                if (invisibleLineStyle == null)
+                {
+                    reason = "BuiltInCategory.OST_InvisibleLines was unavailable.";
+                    return false;
+                }
+
                 var referenceArray = new ReferenceArray();
                 double stubMin = minOther;
                 double stubMax = maxOther;
@@ -1932,6 +2752,12 @@ namespace RevitMCP.Core
                     }
 
                     createdReferenceCurves.Add(detailCurve);
+                    detailCurve.LineStyle = invisibleLineStyle;
+                    if (detailCurve.LineStyle == null ||
+                        detailCurve.LineStyle.Id.GetIdValue() != invisibleLineStyle.Id.GetIdValue())
+                    {
+                        throw new InvalidOperationException("Invisible detail curve line style read-back failed.");
+                    }
                     Reference reference = detailCurve.GeometryCurve?.Reference;
                     if (reference == null)
                     {
@@ -1965,37 +2791,11 @@ namespace RevitMCP.Core
                     return false;
                 }
 
+                createdDimensionId = dimension.Id;
                 ApplyDimensionType(dimension, dimensionType);
 
-                GraphicsStyle invisibleLineStyle = TryFindExistingInvisibleLineStyle(doc);
-                bool invisibleLineStyleApplied = invisibleLineStyle != null;
                 foreach (DetailCurve detailCurve in createdReferenceCurves)
-                {
                     aggregate.ReferenceCurveIds.Add(detailCurve.Id);
-
-                    if (invisibleLineStyle == null)
-                    {
-                        invisibleLineStyleApplied = false;
-                        continue;
-                    }
-
-                    try
-                    {
-                        detailCurve.LineStyle = invisibleLineStyle;
-                    }
-                    catch
-                    {
-                        invisibleLineStyleApplied = false;
-                    }
-                }
-
-                if (!invisibleLineStyleApplied)
-                {
-                    aggregate.Warnings.Add("Dimension detail-curve fallback succeeded, but Revit did not expose/apply BuiltInCategory.OST_InvisibleLines to the helper curves.");
-                    aggregate.DimensionFallbackReason = AppendCurtainElevationWarning(
-                        aggregate.DimensionFallbackReason,
-                        "detail curve fallback dimension succeeded, invisible line style was not applied.");
-                }
 
                 LastCurtainElevationDimensionTypeId = dimensionType.Id.GetIdValue();
                 dimensionId = dimension.Id;
@@ -2003,6 +2803,14 @@ namespace RevitMCP.Core
             }
             catch (Exception ex)
             {
+                try
+                {
+                    if (createdDimensionId != null && doc.GetElement(createdDimensionId) != null)
+                        doc.Delete(createdDimensionId);
+                }
+                catch
+                {
+                }
                 DeleteCurtainElevationDetailCurves(doc, createdReferenceCurves);
                 reason = ex.Message;
                 return false;
