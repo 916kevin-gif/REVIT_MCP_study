@@ -512,9 +512,6 @@ namespace RevitMCP.Core
                     case "create_dimension_by_bounding_box":
                         result = CreateDimensionByBoundingBox(parameters);
                         break;
-                    case "auto_dimension_walls":
-                        result = AutoDimensionWalls(parameters);
-                        break;
 
                     // === 從屬視圖模組 ===
                     case "calculate_grid_bounds":
@@ -673,6 +670,9 @@ namespace RevitMCP.Core
                         break;
                     case "diagnose_curtain_wall_elevation_direction":
                         result = DiagnoseCurtainWallElevationDirection(parameters);
+                        break;
+                    case "diagnose_curtain_wall_elevation_dimensions":
+                        result = DiagnoseCurtainWallElevationDimensions(parameters);
                         break;
                     case "diagnose_curtain_wall_elevation_directions":
                         result = DiagnoseCurtainWallElevationDirections(parameters);
