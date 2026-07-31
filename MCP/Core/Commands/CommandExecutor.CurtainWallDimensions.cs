@@ -3700,5 +3700,315 @@ namespace RevitMCP.Core
             if (string.IsNullOrWhiteSpace(warning)) return current;
             return string.IsNullOrWhiteSpace(current) ? warning : current + " " + warning;
         }
+        private class CurtainLevelReferenceInfo
+        {
+            public IdType? ElementId { get; set; }
+            public string ReferenceSource { get; set; }
+            public string ElementReferenceType { get; set; }
+            public string StableRepresentation { get; set; }
+            public bool StableRoundTripPassed { get; set; }
+            public string Failure { get; set; }
+        }
+        private class CurtainLevelRuntimeAttempt
+        {
+            public string Name { get; set; }
+            public string ViewState { get; set; }
+            public string ReferenceStrategy { get; set; }
+            public int ExpectedReferenceCount { get; set; }
+            public List<CurtainLevelReferenceInfo> InputReferences { get; set; } = new List<CurtainLevelReferenceInfo>();
+            public double LevelYmm { get; set; }
+            public double CurtainBottomYmm { get; set; }
+            public double CurtainTopYmm { get; set; }
+            public double DimensionLineXmm { get; set; }
+            public List<double> ExpectedSegmentValuesMm { get; set; } = new List<double>();
+            public List<double> ActualSegmentValuesMm { get; set; } = new List<double>();
+            public bool? SegmentValuesPassed { get; set; }
+            public int? PreCommitReferenceCount { get; set; }
+            public bool ReferenceAcquired { get; set; }
+            public bool StableRoundTripPassed { get; set; }
+            public bool DimensionCreated { get; set; }
+            public bool TransactionCommitted { get; set; }
+            public IdType? DimensionId { get; set; }
+            public IdType? OwnerViewId { get; set; }
+            public bool? PreCommitAreReferencesAvailable { get; set; }
+            public bool? PostCommitAreReferencesAvailable { get; set; }
+            public int? PostCommitReferenceCount { get; set; }
+            public int? NumberOfSegments { get; set; }
+            public IdType? HelperCurveId { get; set; }
+            public IdType? HelperOwnerViewId { get; set; }
+            public IdType? HelperLineStyleId { get; set; }
+            public bool? HelperUsesInvisibleLines { get; set; }
+            public string FailureStage { get; set; }
+            public string PostCommitValidationMode { get; set; }
+            public string ExceptionType { get; set; }
+            public string ExceptionMessage { get; set; }
+            public string ExceptionStackTrace { get; set; }
+            public bool Passed { get; set; }
+        }
+        private class CurtainLevelProductionAttempt
+        {
+            public string ViewState { get; set; }
+            public string FailureStage { get; set; }
+            public string ExceptionType { get; set; }
+            public string ExceptionMessage { get; set; }
+            public string ExceptionStackTrace { get; set; }
+            public string Status { get; set; }
+            public string LevelOffsetDimensionMode { get; set; }
+            public string LevelOffsetDimensionStatus { get; set; }
+            public string LevelOffsetDimensionReferenceSource { get; set; }
+            public IdType? TotalHeightDimensionId { get; set; }
+            public IdType? LevelOffsetDimensionElementId { get; set; }
+            public bool? TotalHeightReferencesAvailable { get; set; }
+            public bool? LevelOffsetReferencesAvailable { get; set; }
+            public string PostCommitValidationMode { get; set; }
+            public bool? SegmentValuesPassed { get; set; }
+            public List<object> PostCommitDimensionValidation { get; set; } = new List<object>();
+            public List<double> ExpectedSegmentValuesMm { get; set; } = new List<double>();
+            public List<double> ActualTotalHeightSegmentValuesMm { get; set; } = new List<double>();
+            public List<double> ActualLevelOffsetSegmentValuesMm { get; set; } = new List<double>();
+            public List<string> Warnings { get; set; } = new List<string>();
+            public bool Passed { get; set; }
+        }
+        private object DiagnoseCurtainWallElevationLevelOffsetRuntime(JObject parameters)
+        {
+            Document doc=_uiApp.ActiveUIDocument.Document;
+            UIDocument uidoc=_uiApp.ActiveUIDocument;
+            IdType? viewId=parameters["viewId"]?.Value<IdType?>();
+            ViewSection view=viewId.HasValue?doc.GetElement(new ElementId(viewId.Value)) as ViewSection:uidoc.ActiveView as ViewSection;
+            if(view==null||view.IsTemplate||view.ViewType!=ViewType.Elevation) throw new Exception("level_offset runtime test requires a valid elevation viewId or active elevation.");
+            IdType? wallId=parameters["wallId"]?.Value<IdType?>();
+            Wall wall=wallId.HasValue?doc.GetElement(new ElementId(wallId.Value)) as Wall:ResolveSingleSelectedCurtainWall(uidoc,doc);
+            if(wall==null||wall.CurtainGrid==null) throw new Exception("level_offset runtime test requires wallId or exactly one selected curtain wall; first-wall fallback is disabled.");
+            var warnings=new List<string>();
+            CurtainElevationDimensionTypeResolution typeResolution=ResolveCurtainElevationDimensionType(doc,parameters,warnings);
+            DimensionType dimensionType=typeResolution.DimensionType;
+            if(dimensionType==null) throw new Exception("level_offset runtime test could not resolve a DimensionType.");
+            double inner=(parameters["dimensionOffsetMm"]?.Value<double>()??300.0)/304.8;
+            double stack=(parameters["dimensionStackOffsetMm"]?.Value<double>()??250.0)/304.8;
+            CurtainElevationDimensionStackOffsetResolution offsets=ResolveCurtainElevationDimensionStackOffset(dimensionType,view.Scale,inner,stack);
+            if(!string.IsNullOrWhiteSpace(offsets.Warning)) warnings.Add(offsets.Warning);
+            View original=uidoc.ActiveView;
+            var originalTabs=new HashSet<IdType>(uidoc.GetOpenUIViews().Select(x=>x.ViewId.GetIdValue()));
+            var attempts=new List<CurtainLevelRuntimeAttempt>();
+            var production=new List<CurtainLevelProductionAttempt>();
+            var tempIds=new List<ElementId>();
+            var failures=new List<string>();
+            bool inactiveEstablished=original?.Id!=view.Id,activated=false;
+            string inactiveFailure=null,activationFailure=null;
+            double minX=0,maxX=0,minY=0,maxY=0,levelY=0,leftX=0;
+            Transform frame=null;
+            List<CurtainElevationGeometryReference> heightRefs=null;
+            IdType? levelId=null; string levelName=null;
+            using(TransactionGroup group=new TransactionGroup(doc,"Diagnose curtain Level offset dimensions (Rollback)"))
+            {
+                group.Start();
+                try
+                {
+                    using(Transaction setup=TransactionHelper.Begin(doc,"Prepare curtain Level offset runtime test"))
+                    {
+                        setup.Start();
+                        XYZ mid=(wall.Location as LocationCurve)?.Curve?.Evaluate(0.5,true);
+                        CurtainElevationCropResult crop=ConfigureCurtainElevationCrop(doc,view,wall,mid,view.Origin,0,0,1200.0/304.8);
+                        doc.Regenerate();
+                        Transform source=GetCurtainElevationView2DFrame(view,view.CropBox?.Transform);
+                        frame=GetCurtainElevationDimensionFrame(view,source);
+                        if(frame==null||source==null||crop?.View2DMin==null||crop.View2DMax==null) throw new InvalidOperationException("Production crop or dimension frame was unavailable.");
+                        XYZ delta=source.Origin-frame.Origin;
+                        double xs=delta.DotProduct(frame.BasisX),ys=delta.DotProduct(frame.BasisY);
+                        minX=(crop.WallBoundaryMinXFt??crop.View2DMin.X)+xs;
+                        maxX=(crop.WallBoundaryMaxXFt??crop.View2DMax.X)+xs;
+                        minY=(crop.CurtainGeometryMinYFt??crop.View2DMin.Y)+ys;
+                        maxY=(crop.CurtainGeometryMaxYFt??crop.View2DMax.Y)+ys;
+                        if(!crop.CropBottomLevelViewYFt.HasValue) throw new InvalidOperationException("Projected wall Level Y was unavailable.");
+                        levelY=crop.CropBottomLevelViewYFt.Value+ys;
+                        Level level=doc.GetElement(wall.LevelId) as Level;
+                        if(level==null) throw new InvalidOperationException("wall.LevelId did not resolve to Level.");
+                        levelId=level.Id.GetIdValue(); levelName=level.Name;
+                        var geometry=CollectCurtainElevationGeometryReferences(doc,wall,view,frame,minX,maxX,minY,maxY);
+                        heightRefs=SelectCurtainElevationBoundaryReferences(geometry,"vertical",minX,maxX,minY,maxY);
+                        if(heightRefs.Count!=2) throw new InvalidOperationException($"Expected 2 curtain bottom/top references, got {heightRefs.Count}.");
+                        leftX=minX-offsets.InnerOffsetFt-offsets.ResolvedOffsetFt;
+                        setup.Commit();
+                    }
+                    if(uidoc.ActiveView?.Id==view.Id)
+                    {
+                        View alternate=ResolveCurtainElevationAlternateDiagnosticView(uidoc,doc,view);
+                        if(alternate==null) inactiveFailure="No alternate graphical view was available.";
+                        else try{uidoc.ActiveView=alternate;uidoc.RefreshActiveView();inactiveEstablished=uidoc.ActiveView?.Id!=view.Id;}catch(Exception ex){inactiveFailure=ex.Message;}
+                    }
+                    if(inactiveEstablished) RunCurtainLevelRuntimeMatrix(doc,view,wall,frame,dimensionType,minX,maxX,minY,maxY,levelY,leftX,offsets.ResolvedOffsetFt,heightRefs,"inactive",attempts,production,tempIds);
+                    try{uidoc.ActiveView=view;uidoc.RefreshActiveView();activated=uidoc.ActiveView?.Id==view.Id;if(!activated)activationFailure="ActiveView did not change.";}catch(Exception ex){activationFailure=ex.Message;}
+                    if(activated) RunCurtainLevelRuntimeMatrix(doc,view,wall,frame,dimensionType,minX,maxX,minY,maxY,levelY,leftX,offsets.ResolvedOffsetFt,heightRefs,"active",attempts,production,tempIds);
+                }
+                catch(Exception ex){failures.Add(ex.ToString());}
+                finally
+                {
+                    try{if(original!=null&&doc.GetElement(original.Id)!=null){uidoc.ActiveView=original;uidoc.RefreshActiveView();}}catch(Exception ex){failures.Add("Restore ActiveView failed: "+ex.Message);}
+                    if(group.GetStatus()==TransactionStatus.Started) group.RollBack();
+                }
+            }
+            bool cleanup=tempIds.Where(id=>id!=null&&id!=ElementId.InvalidElementId).Distinct().All(id=>doc.GetElement(id)==null);
+            foreach(UIView tab in uidoc.GetOpenUIViews().ToList())
+            {
+                if(originalTabs.Contains(tab.ViewId.GetIdValue())||tab.ViewId==uidoc.ActiveView?.Id) continue;
+                try{tab.Close();}catch(Exception ex){failures.Add("Close diagnostic tab failed: "+ex.Message);}
+            }
+            return new
+            {
+                TestMode="level_offset",WallId=wall.Id.GetIdValue(),ViewId=view.Id.GetIdValue(),ViewName=view.Name,
+                LevelId=levelId,LevelName=levelName,LevelYmm=Math.Round(levelY*304.8,4),CurtainBottomYmm=Math.Round(minY*304.8,4),
+                CurtainTopYmm=Math.Round(maxY*304.8,4),SignedBottomToLevelMm=Math.Round((minY-levelY)*304.8,4),
+                DimensionTypeId=dimensionType.Id.GetIdValue(),DimensionTypeName=dimensionType.Name,DimensionTypeSource=typeResolution.Source,
+                WasViewOpen=originalTabs.Contains(view.Id.GetIdValue()),WasViewActive=original?.Id==view.Id,
+                InactiveControlEstablished=inactiveEstablished,InactiveControlFailure=inactiveFailure,ActivationSucceeded=activated,ActivationFailure=activationFailure,
+                RuntimeAttempts=attempts,ProductionPathAttempts=production,FirstFailure=attempts.FirstOrDefault(x=>!x.Passed),
+                FirstProductionFailure=production.FirstOrDefault(x=>!x.Passed),TemporaryElementIds=tempIds.Select(x=>x.GetIdValue()).Distinct().ToList(),
+                FailureStage=failures.Count>0?"setup_or_view_control":attempts.FirstOrDefault(x=>!x.Passed)?.FailureStage??production.FirstOrDefault(x=>!x.Passed)?.FailureStage??(cleanup?null:"cleanup"),
+                RollbackCleanupPassed=cleanup,CleanupFailureStage=cleanup?null:"cleanup",ForcedRollback=true,Warnings=warnings,Failures=failures
+            };
+        }
+        private Wall ResolveSingleSelectedCurtainWall(UIDocument uidoc,Document doc)
+        {
+            List<Wall> walls=uidoc.Selection.GetElementIds().Select(id=>doc.GetElement(id) as Wall).Where(x=>x!=null).Where(x=>{try{return x.CurtainGrid!=null;}catch{return false;}}).ToList();
+            return walls.Count==1?walls[0]:null;
+        }
+        private View ResolveCurtainElevationAlternateDiagnosticView(UIDocument uidoc,Document doc,View target)
+        {
+            View open=uidoc.GetOpenUIViews().Where(x=>x.ViewId!=target.Id).Select(x=>doc.GetElement(x.ViewId) as View).FirstOrDefault(x=>x!=null&&!x.IsTemplate);
+            return open??new FilteredElementCollector(doc).OfClass(typeof(View)).Cast<View>().FirstOrDefault(x=>!x.IsTemplate&&x.Id!=target.Id&&x.CanBePrinted);
+        }
+        private void RunCurtainLevelRuntimeMatrix(Document doc,ViewSection view,Wall wall,Transform frame,DimensionType type,double minX,double maxX,double minY,double maxY,double levelY,double lineX,double stackOffsetFt,List<CurtainElevationGeometryReference> refs,string state,List<CurtainLevelRuntimeAttempt> attempts,List<CurtainLevelProductionAttempt> production,List<ElementId> ids)
+        {
+            foreach(string strategy in new[]{"level_plane","invisible_detail_curve"})
+            {
+                attempts.Add(RunCurtainLevelRuntimeAttempt(doc,view,wall,frame,type,minX,maxX,minY,maxY,levelY,lineX,refs,state,strategy,false,ids));
+                attempts.Add(RunCurtainLevelRuntimeAttempt(doc,view,wall,frame,type,minX,maxX,minY,maxY,levelY,lineX,refs,state,strategy,true,ids));
+            }
+            production.Add(RunCurtainLevelProductionAttempt(doc,view,wall,frame,type,minX,maxX,minY,maxY,levelY,lineX,stackOffsetFt,refs,state,ids));
+        }
+
+        private CurtainLevelRuntimeAttempt RunCurtainLevelRuntimeAttempt(Document doc,ViewSection view,Wall wall,Transform frame,DimensionType type,double minX,double maxX,double minY,double maxY,double levelY,double lineX,List<CurtainElevationGeometryReference> heightRefs,string viewState,string strategy,bool includeTop,List<ElementId> tempIds)
+        {
+            var attempt=new CurtainLevelRuntimeAttempt
+            {
+                Name=$"{strategy}_{(includeTop?"three_reference":"two_reference")}_{viewState}",ViewState=viewState,ReferenceStrategy=strategy,
+                ExpectedReferenceCount=includeTop?3:2,LevelYmm=Math.Round(levelY*304.8,4),CurtainBottomYmm=Math.Round(minY*304.8,4),
+                CurtainTopYmm=Math.Round(maxY*304.8,4),DimensionLineXmm=Math.Round(lineX*304.8,4),FailureStage="reference_acquisition"
+            };
+            Transaction tx=null;
+            var aggregate=new CurtainElevationDimensionResult{WallId=wall.Id};
+            try
+            {
+                tx=TransactionHelper.Begin(doc,"Runtime test curtain Level offset "+attempt.Name);tx.Start();
+                CurtainElevationGeometryReference levelRef; string reason;
+                if(strategy=="level_plane")
+                {
+                    if(!TryCreateCurtainElevationLevelPlaneReference(doc,doc.GetElement(wall.LevelId) as Level,minX,maxX,levelY,out levelRef,out reason)) throw new InvalidOperationException(reason);
+                }
+                else
+                {
+                    if(!TryCreateCurtainElevationInvisibleLevelReference(doc,view,frame,minX,maxX,levelY,aggregate,out levelRef,out reason)) throw new InvalidOperationException(reason);
+                    attempt.HelperCurveId=levelRef.ElementId.GetIdValue();tempIds.Add(levelRef.ElementId);
+                    DetailCurve helper=doc.GetElement(levelRef.ElementId) as DetailCurve;
+                    attempt.HelperOwnerViewId=helper?.OwnerViewId.GetIdValue();attempt.HelperLineStyleId=helper?.LineStyle?.Id.GetIdValue();
+                    GraphicsStyle invisible=TryFindCurtainElevationLevelInvisibleLineStyle(doc);
+                    attempt.HelperUsesInvisibleLines=helper?.LineStyle!=null&&invisible!=null&&helper.LineStyle.Id.GetIdValue()==invisible.Id.GetIdValue();
+                }
+                attempt.ReferenceAcquired=true;
+                var refs=new List<CurtainElevationGeometryReference>{levelRef,heightRefs[0]};if(includeTop)refs.Add(heightRefs[1]);refs=refs.OrderBy(x=>x.CenterY).ToList();
+                var coordinates=refs.Select(x=>x.CenterY).ToList();
+                attempt.InputReferences=refs.Select(x=>BuildCurtainLevelReferenceInfo(doc,x)).ToList();
+                attempt.StableRoundTripPassed=attempt.InputReferences.All(x=>x.StableRoundTripPassed);
+                if(!attempt.StableRoundTripPassed){attempt.FailureStage="stable_round_trip";throw new InvalidOperationException("Input reference stable round-trip failed.");}
+                attempt.ExpectedSegmentValuesMm=coordinates.Zip(coordinates.Skip(1),(a,b)=>Math.Round(Math.Abs(b-a)*304.8,4)).ToList();
+                attempt.FailureStage="creation";
+                var array=new ReferenceArray();foreach(var item in refs)array.Append(item.Reference);
+                Dimension dimension=doc.Create.NewDimension(view,Line.CreateBound(CurtainElevationPointAt2D(frame,lineX,coordinates.First()),CurtainElevationPointAt2D(frame,lineX,coordinates.Last())),array);
+                if(dimension==null)throw new InvalidOperationException("Revit returned null Dimension.");
+                ApplyDimensionType(dimension,type);doc.Regenerate();
+                attempt.DimensionCreated=true;attempt.DimensionId=dimension.Id.GetIdValue();attempt.OwnerViewId=dimension.OwnerViewId.GetIdValue();tempIds.Add(dimension.Id);
+                attempt.FailureStage="pre_commit";attempt.PreCommitAreReferencesAvailable=dimension.AreReferencesAvailable;attempt.PreCommitReferenceCount=dimension.References?.Size??0;
+                attempt.FailureStage="commit";tx.Commit();attempt.TransactionCommitted=true;tx=null;
+                attempt.FailureStage="post_commit";
+                Dimension persisted=doc.GetElement(new ElementId(attempt.DimensionId.Value)) as Dimension;
+                if(persisted==null)throw new InvalidOperationException("Dimension did not exist after commit.");
+                attempt.PostCommitAreReferencesAvailable=persisted.AreReferencesAvailable;attempt.PostCommitReferenceCount=persisted.References?.Size??0;
+                attempt.NumberOfSegments=persisted.NumberOfSegments;attempt.ActualSegmentValuesMm=GetCurtainElevationDimensionValuesMm(persisted);
+                attempt.FailureStage="segment_validation";attempt.SegmentValuesPassed=CurtainLevelValuesMatch(attempt.ExpectedSegmentValuesMm,attempt.ActualSegmentValuesMm,0.5);
+                bool levelPlaneFalseNegative=strategy=="level_plane"&&attempt.PostCommitAreReferencesAvailable!=true&&attempt.PostCommitReferenceCount==attempt.ExpectedReferenceCount&&attempt.SegmentValuesPassed==true;
+                attempt.PostCommitValidationMode=attempt.PostCommitAreReferencesAvailable==true
+                    ?"strict_references_available"
+                    :(levelPlaneFalseNegative?"level_plane_segment_validation":"failed");
+                bool referenceValidationPassed=attempt.PostCommitAreReferencesAvailable==true||levelPlaneFalseNegative;
+                attempt.Passed=attempt.OwnerViewId==view.Id.GetIdValue()&&referenceValidationPassed&&attempt.PostCommitReferenceCount==attempt.ExpectedReferenceCount&&attempt.SegmentValuesPassed==true&&(strategy!="invisible_detail_curve"||attempt.HelperUsesInvisibleLines==true);
+                attempt.FailureStage=attempt.Passed?null:"post_commit_assertion";
+            }
+            catch(Exception ex)
+            {
+                if(tx!=null&&tx.GetStatus()==TransactionStatus.Started)tx.RollBack();
+                attempt.ExceptionType=ex.GetType().FullName;attempt.ExceptionMessage=ex.Message;attempt.ExceptionStackTrace=ex.StackTrace;attempt.Passed=false;
+            }
+            return attempt;
+        }
+        private CurtainLevelProductionAttempt RunCurtainLevelProductionAttempt(Document doc,ViewSection view,Wall wall,Transform frame,DimensionType type,double minX,double maxX,double minY,double maxY,double levelY,double lineX,double stackOffsetFt,List<CurtainElevationGeometryReference> heightRefs,string viewState,List<ElementId> tempIds)
+        {
+            var attempt=new CurtainLevelProductionAttempt{ViewState=viewState,FailureStage="production_creation"};
+            var result=new CurtainElevationDimensionResult{WallId=wall.Id};
+            try
+            {
+                using(Transaction tx=TransactionHelper.Begin(doc,"Runtime test production Level offset "+viewState))
+                {
+                    tx.Start();CreateCurtainElevationTotalHeightAndLevelOffsetDimensions(doc,view,wall,frame,type,minX,maxX,minY,maxY,levelY,lineX,stackOffsetFt,heightRefs,result);tx.Commit();
+                }
+                attempt.FailureStage="production_post_commit_repair";FinalizeCurtainElevationDimensionsAfterCommit(doc,new[]{result});
+                foreach(ElementId id in new[]{result.TotalHeightDimensionId,result.LevelOffsetDimensionElementId}.Concat(result.ReferenceCurveIds).Where(x=>x!=null&&x!=ElementId.InvalidElementId).Distinct()){tempIds.Add(id);}
+                attempt.Status=result.Status;attempt.LevelOffsetDimensionMode=result.LevelOffsetDimensionMode;attempt.LevelOffsetDimensionStatus=result.LevelOffsetDimensionStatus;
+                attempt.LevelOffsetDimensionReferenceSource=result.LevelOffsetDimensionReferenceSource;attempt.TotalHeightDimensionId=result.TotalHeightDimensionId?.GetIdValue();
+                attempt.LevelOffsetDimensionElementId=result.LevelOffsetDimensionElementId?.GetIdValue();attempt.TotalHeightReferencesAvailable=result.TotalHeightDimensionAreReferencesAvailable;
+                attempt.LevelOffsetReferencesAvailable=result.LevelOffsetDimensionAreReferencesAvailable;attempt.Warnings=result.Warnings.ToList();
+                CurtainElevationPendingDimension levelPending=result.PendingNativeDimensions.FirstOrDefault(IsCurtainElevationLevelOffsetPlanePending);
+                attempt.PostCommitValidationMode=levelPending?.PostCommitValidationMode;
+                attempt.SegmentValuesPassed=levelPending?.SegmentValuesPassed;
+                attempt.PostCommitDimensionValidation=result.PostCommitDimensionValidation.ToList();
+                Dimension total=result.TotalHeightDimensionId==null?null:doc.GetElement(result.TotalHeightDimensionId) as Dimension;
+                Dimension offset=result.LevelOffsetDimensionElementId==null?null:doc.GetElement(result.LevelOffsetDimensionElementId) as Dimension;
+                attempt.ActualTotalHeightSegmentValuesMm=GetCurtainElevationDimensionValuesMm(total);attempt.ActualLevelOffsetSegmentValuesMm=GetCurtainElevationDimensionValuesMm(offset);
+                double signed=minY-levelY;
+                if(Math.Abs(signed)<=1.0/304.8)
+                {
+                    attempt.ExpectedSegmentValuesMm=new List<double>{Math.Round((maxY-minY)*304.8,4)};
+                    attempt.Passed=result.LevelOffsetDimensionStatus=="skipped_zero_distance"&&total!=null&&result.TotalHeightDimensionAreReferencesAvailable==true;
+                }
+                else if(signed>0)
+                {
+                    attempt.ExpectedSegmentValuesMm=new List<double>{Math.Round((minY-levelY)*304.8,4),Math.Round((maxY-minY)*304.8,4)};
+                    attempt.Passed=total!=null&&result.LevelOffsetDimensionElementId!=null&&result.TotalHeightDimensionId.GetIdValue()==result.LevelOffsetDimensionElementId.GetIdValue()&&result.LevelOffsetDimensionReferenceSource=="wall_level_plane_reference"&&levelPending?.PostCommitValidationPassed==true&&CurtainLevelValuesMatch(attempt.ExpectedSegmentValuesMm,attempt.ActualTotalHeightSegmentValuesMm,0.5);
+                }
+                else
+                {
+                    attempt.ExpectedSegmentValuesMm=new List<double>{Math.Round(Math.Abs(minY-levelY)*304.8,4),Math.Round((maxY-minY)*304.8,4)};
+                    attempt.Passed=total!=null&&offset!=null&&result.TotalHeightDimensionAreReferencesAvailable==true&&result.LevelOffsetDimensionReferenceSource=="wall_level_plane_reference"&&levelPending?.PostCommitValidationPassed==true&&CurtainLevelValuesMatch(new[]{attempt.ExpectedSegmentValuesMm[1]},attempt.ActualTotalHeightSegmentValuesMm,0.5)&&CurtainLevelValuesMatch(new[]{attempt.ExpectedSegmentValuesMm[0]},attempt.ActualLevelOffsetSegmentValuesMm,0.5);
+                }
+                attempt.FailureStage=attempt.Passed?null:"production_assertion";
+            }
+            catch(Exception ex){attempt.ExceptionType=ex.GetType().FullName;attempt.ExceptionMessage=ex.Message;attempt.ExceptionStackTrace=ex.StackTrace;attempt.Passed=false;}
+            return attempt;
+        }
+        private CurtainLevelReferenceInfo BuildCurtainLevelReferenceInfo(Document doc,CurtainElevationGeometryReference reference)
+        {
+            var info=new CurtainLevelReferenceInfo{ElementId=reference.ElementId?.GetIdValue(),ReferenceSource=reference.ReferenceSource};
+            try
+            {
+                info.ElementReferenceType=reference.Reference.ElementReferenceType.ToString();info.StableRepresentation=reference.Reference.ConvertToStableRepresentation(doc);
+                Reference parsed=Reference.ParseFromStableRepresentation(doc,info.StableRepresentation);
+                info.StableRoundTripPassed=parsed!=null&&parsed.ElementId!=null&&reference.ElementId!=null&&parsed.ElementId.GetIdValue()==reference.ElementId.GetIdValue();
+            }
+            catch(Exception ex){info.Failure=ex.Message;}
+            return info;
+        }
+        private bool CurtainLevelValuesMatch(IList<double> expected,IList<double> actual,double toleranceMm)
+        {
+            return expected!=null&&actual!=null&&expected.Count==actual.Count&&expected.Zip(actual,(a,b)=>Math.Abs(a-b)<=toleranceMm).All(x=>x);
+        }
     }
 }

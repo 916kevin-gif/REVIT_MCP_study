@@ -4,13 +4,11 @@ function Assert-True {
     if (-not $Condition) { throw "FAIL: $Message" }
 }
 $root = Split-Path -Parent $PSScriptRoot
-$mainPath = Join-Path $root "MCP\Core\Commands\CommandExecutor.CurtainWallLevelOffsetRuntime.cs"
-$attemptPath = Join-Path $root "MCP\Core\Commands\CommandExecutor.CurtainWallLevelOffsetRuntime.Attempts.cs"
 $dimensionPath = Join-Path $root "MCP\Core\Commands\CommandExecutor.CurtainWallDimensions.cs"
 $schemaPath = Join-Path $root "MCP-Server\src\tools\curtain-wall-tools.ts"
-$main = [IO.File]::ReadAllText($mainPath, [Text.Encoding]::UTF8)
-$attempts = [IO.File]::ReadAllText($attemptPath, [Text.Encoding]::UTF8)
 $dimension = [IO.File]::ReadAllText($dimensionPath, [Text.Encoding]::UTF8)
+$main = $dimension
+$attempts = $dimension
 $schema = [IO.File]::ReadAllText($schemaPath, [Text.Encoding]::UTF8)
 Assert-True ($schema.Contains('"level_offset"')) "MCP schema must expose level_offset"
 Assert-True ($dimension.Contains('if (testMode == "level_offset")')) "diagnostic dispatch must route level_offset before legacy fallback"
@@ -52,7 +50,10 @@ Assert-True ($dimension.Contains("referenceCount == pending.ExpectedReferenceCou
 Assert-True ($dimension.Contains("pending.SegmentValuesPassed == true")) "Level false-negative must validate segment values"
 Assert-True ($dimension.Contains("SetCurtainElevationDimensionAvailability(result, pending.Kind, referencesAvailable)")) "API AreReferencesAvailable value must be preserved"
 Assert-True ($dimension.Contains("private GraphicsStyle TryFindCurtainElevationLevelInvisibleLineStyle")) "Level-specific Invisible Lines resolver missing"
-Assert-True (([regex]::Matches($dimension, "TryFindCurtainElevationLevelInvisibleLineStyle").Count) -eq 2) "Level-specific Invisible Lines resolver must not be used by general dimension fallback"
+$runtimeDiagnosticStart = $dimension.IndexOf("private class CurtainLevelReferenceInfo")
+Assert-True ($runtimeDiagnosticStart -gt 0) "consolidated runtime diagnostic section missing"
+$productionDimension = $dimension.Substring(0, $runtimeDiagnosticStart)
+Assert-True (([regex]::Matches($productionDimension, "TryFindCurtainElevationLevelInvisibleLineStyle").Count) -eq 2) "Level-specific Invisible Lines resolver must not be used by general dimension fallback"
 Assert-True ($dimension.Contains("style.GraphicsStyleCategory.Id.GetIdValue() == invisibleCategoryId")) "Level-specific resolver must search GraphicsStyle by OST_InvisibleLines category id"
 Assert-True ($attempts.Contains('PostCommitValidationMode')) "level_offset runtime must report validation mode"
 Assert-True ($attempts.Contains('result.LevelOffsetDimensionReferenceSource=="wall_level_plane_reference"')) "production runtime must require the retained Level plane source"
