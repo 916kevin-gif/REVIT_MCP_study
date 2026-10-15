@@ -37,8 +37,8 @@ These counts must be derived from source, not copied by memory.
 
 | Item | Current Count | Source of Truth |
 |---|---:|---|
-| Runtime MCP tools | 221 | `registerRevitTools()` from `MCP-Server/src/tools/index.ts` |
-| Domain SOP files | 83 | `domain/*.md` except `domain/README.md`, plus `domain/references/*.md` |
+| Runtime MCP tools | 222 | `registerRevitTools()` from `MCP-Server/src/tools/index.ts` |
+| Domain SOP files | 84 | `domain/*.md` except `domain/README.md`, plus `domain/references/*.md` |
 | Claude skills | 61 | `.claude/skills/*/SKILL.md` |
 
 When these numbers change, update `CLAUDE.md`, `README.md`, `README.zh-TW.md`, `docs/DOCUMENT_AUDIENCE_INVENTORY.md`, and any public site copy that makes grand-total claims. Then run `scripts/verify-qaqc.ps1 -SkipBuild -SkipDeploy`.
@@ -319,6 +319,7 @@ Read the matching file before applying a workflow or calculation.
 | parking count, parking space review | `domain/parking-space-review.md` |
 | PDF export, DCC, PDFExportOptions | `domain/pdf-export-comparison.md` |
 | fill pattern, Revit fill pattern conversion | `domain/revit-fill-pattern-conversion.md` |
+| material image, material texture, appearance asset, relink material images, missing texture, 材料影像, 材質貼圖, 貼圖遺失 | `domain/material-image-relinking.md` |
 | partition takeoff, partition quantity | `domain/revit-partition-takeoff.md` |
 | room boundary, room boundary model | `domain/room-boundary.md` |
 | room height, 房間高度, upper limit, limit offset | `domain/room-height-limit.md` |

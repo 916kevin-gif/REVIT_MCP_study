@@ -32,7 +32,7 @@
 | `wall-check.md` | wall-orientation-check | 牆壁方向、內外側 |
 | `dependent-view-crop-workflow.md` | dependent-view-crop | 從屬視圖、分區出圖 |
 
-### 不需要成為 Skill 的 Domain（18 個，含 README）
+### 不需要成為 Skill 的 Domain（21 個，含 README）
 
 | Domain 文件 | 類型 | 不成為 Skill 的原因 |
 |------------|------|-------------------|
@@ -54,6 +54,7 @@
 | `quantity-takeoff-excel.md` | 技術參考 | 以房間為基礎的數量計算 Excel 共通方法，被數量相關工作流程引用 |
 | `matchline-automation.md` | 輔助工作流程 | 銜接線自動標註邏輯，屬從屬視圖出圖流程背景知識，無專屬 Skill |
 | `viewport-type-scale-sync.md` | 輔助工作流程 | 視埠標題類型依比例同步邏輯，屬圖紙管理背景知識，無專屬 Skill |
+| `material-image-relinking.md` | 輔助工作流程 | 材料 Appearance Asset 遺失貼圖的檔名比對、衝突與逐 Asset rollback 規則，由單一 MCP 工具直接執行，無專屬 Skill |
 | `mep-space-demand-matrix.md` | 前期方法論（Skill 待補） | MEP 前期容量與空間收斂方法。核心載體 Space 目前無 MCP 工具支援（見 `tool-capability-boundary.md` L12），須先實機驗證 `create_view_schedule` 能否建立 Space 明細表，確認自動化程度後才產生對應 Skill |
 | `README.md` | 目錄導航 | 本檔案，不是工作流程 |
 
